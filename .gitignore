@@ -1,0 +1,13 @@
+build/
+install/
+out/
+.vs/
+.cache/
+vcpkg_installed/
+compile_commands.json
+CMakeUserPresets.json
+*.user
+
+generated_shaders/
+
+*.ini.bak
