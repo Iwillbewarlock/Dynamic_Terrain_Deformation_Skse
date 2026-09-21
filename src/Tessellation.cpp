@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: LicenseRef-NMN-Proprietary
-// Copyright (c) 2026 NearMidnightNow (NMN). All rights reserved.
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (c) 2026 NearMidnightNow (NMN).
 
 #include "PCH.h"
 #include "ShaderCompiler.h"

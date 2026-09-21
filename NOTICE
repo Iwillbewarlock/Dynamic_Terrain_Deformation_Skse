@@ -1,0 +1,16 @@
+Dynamic_Terrain_Deformation_Skse
+Copyright (c) 2026 NearMidnightNow (also published as Maglarnet / NMN).
+
+Third-party dependencies remain under their respective licences. This project's
+licence does not replace the licences of those dependencies.
+
+  CommonLibSSE-NG   MIT     Ryan-rsm-McKenzie and contributors
+  DirectXTK         MIT     Microsoft
+  fmt               MIT     Victor Zverovich
+  spdlog            MIT     Gabime
+  nlohmann/json     MIT
+  xbyak             BSD-3   Herumi
+  rapidcsv          BSD-3   Kristofer Berggren
+
+Refer to each dependency's distributed licence and copyright notices for its
+complete terms and attributions.

@@ -4,13 +4,13 @@ Ground in Skyrim that actually takes a mark. Footprints, trenches through deep s
 
 A standalone SKSE plugin. **No Community Shaders dependency**; it works on vanilla Skyrim SE/AE, with or without ENB.
 
-Copyright (c) 2026 NearMidnightNow (NMN). All rights reserved — see [LICENSE](LICENSE).
+Copyright (c) 2026 NearMidnightNow (NMN).
 
-**The source is here to be read, not to be reused.** It is published so anyone can see exactly what the plugin does to their game — every hook, every draw it touches. That is not the same as an open-source licence, and none is granted. If you want to use part of it, ask.
+Licensed under the **GNU General Public License, version 3 only (GPL-3.0-only)**. See [LICENSE](LICENSE).
 
-Authored in full by NearMidnightNow. This is a heavily reduced standalone SKSE port of the author's own Community Shaders features — cs-footprints, cs-snowblanket, cs-snowcollision, and cs-snowbuildup — and contains no code from Community Shaders itself or from any other project.
+This is a heavily reduced standalone SKSE port of my own Community Shaders features — cs-footprints, cs-snowblanket, cs-snowcollision, and cs-snowbuildup.
 
-Third-party build dependencies remain under their own licences, as listed in [LICENSE](LICENSE).
+Third-party build dependencies remain under their own licences, as listed in [NOTICE](NOTICE).
 
 ## Building
 
