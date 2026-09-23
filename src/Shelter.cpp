@@ -5,6 +5,7 @@
 
 #include "Shelter.h"
 
+#include "BoxFilter.h"
 #include "Clipmap.h"
 #include "Globals.h"
 #include "Profiler.h"
@@ -34,6 +35,9 @@ namespace Shelter
 		std::vector<uint8_t> g_capSmooth;
 		std::vector<float> g_roofDisplay, g_capDisplay;
 		std::vector<uint8_t> g_roofVisible, g_capVisible;
+		// One bit per texel whose roof or cap display has not settled on its target yet. Every
+		// change of g_raw or g_cap sets it (SetTarget, Reset), so the blend skips the rest.
+		std::vector<uint64_t> g_fading;
 		bool g_transition{ false };
 
 		ID3D11Texture2D*          g_texture{ nullptr };
@@ -80,6 +84,7 @@ namespace Shelter
 			g_capDisplay.assign(total, 255.0f);
 			g_roofVisible.assign(total, 0);
 			g_capVisible.assign(total, 255);
+			g_fading.assign(total / 64, 0);
 			g_rowSums.assign(total, 0);
 			g_filledX.assign(total, -0x40000000);
 			g_filledY.assign(total, -0x40000000);
@@ -96,6 +101,18 @@ namespace Shelter
 		void ClearBit(std::vector<uint64_t>& a_bits, uint32_t a_index)
 		{
 			a_bits[a_index >> 6] &= ~(1ull << (a_index & 63));
+		}
+
+		// Changes a texel's roof or cap target and starts its fade. Returns whether it changed.
+		bool SetTarget(std::vector<uint8_t>& a_targets, uint32_t a_index, uint8_t a_value)
+		{
+			if (a_targets[a_index] == a_value) {
+				return false;
+			}
+			a_targets[a_index] = a_value;
+			SetBit(g_fading, a_index);
+			g_transition = true;
+			return true;
 		}
 
 		// Texels from a_from, in ring order, before the next set bit, or a_limit when no bit is
@@ -206,39 +223,7 @@ namespace Shelter
 				return;
 			}
 
-			const int      width = 2 * r + 1;
-			const uint32_t area = static_cast<uint32_t>(width) * static_cast<uint32_t>(width);
-
-			for (int y = 0; y < n; ++y) {
-				const uint8_t* src = &a_src[static_cast<size_t>(y) * n];
-				uint32_t*      dst = &g_rowSums[static_cast<size_t>(y) * n];
-
-				uint32_t sum = 0;
-				for (int k = -r; k <= r; ++k) {
-					sum += src[static_cast<uint32_t>(k) & kMask];
-				}
-				for (int x = 0; x < n; ++x) {
-					dst[x] = sum;
-					sum -= src[static_cast<uint32_t>(x - r) & kMask];
-					sum += src[static_cast<uint32_t>(x + r + 1) & kMask];
-				}
-			}
-
-			for (int x = 0; x < n; ++x) {
-				uint32_t sum = 0;
-				for (int k = -r; k <= r; ++k) {
-					sum += g_rowSums[(static_cast<size_t>(static_cast<uint32_t>(k) & kMask) * n) +
-						static_cast<size_t>(x)];
-				}
-				for (int y = 0; y < n; ++y) {
-					a_dst[(static_cast<size_t>(y) * n) + static_cast<size_t>(x)] =
-						static_cast<uint8_t>(sum / area);
-					sum -= g_rowSums[(static_cast<size_t>(static_cast<uint32_t>(y - r) & kMask) * n) +
-						static_cast<size_t>(x)];
-					sum += g_rowSums[(static_cast<size_t>(static_cast<uint32_t>(y + r + 1) & kMask) * n) +
-						static_cast<size_t>(x)];
-				}
-			}
+			BoxFilter::Apply<kTexels>(a_src.data(), a_dst.data(), g_rowSums.data(), r);
 		}
 	}
 
@@ -345,6 +330,7 @@ namespace Shelter
 		g_capDisplay.clear();
 		g_roofVisible.clear();
 		g_capVisible.clear();
+		g_fading.clear();
 		g_transition = false;
 		g_cap.clear();
 		g_capSmooth.clear();
@@ -377,6 +363,7 @@ namespace Shelter
 
 		std::fill(g_cap.begin(), g_cap.end(), static_cast<uint8_t>(255));
 		std::fill(g_raw.begin(), g_raw.end(), static_cast<uint8_t>(0));
+		std::fill(g_fading.begin(), g_fading.end(), ~0ull);
 
 		g_transition = true;
 		g_capDirty = true;
@@ -599,20 +586,16 @@ namespace Shelter
 			++rays;
 
 			const uint8_t value = occluded ? 255 : 0;
-			if (g_raw[index] != value) {
-				g_raw[index] = value;
+			if (SetTarget(g_raw, index, value)) {
 				++roofChanges;
-				g_transition = true;
 			}
 
 			if (Settings::shelterMeshCap && Ready()) {
 				const uint8_t cap = CapFor(tes, probe.x, probe.y, landZ);
 				++rays;
 
-				if (g_cap[index] != cap) {
-					g_cap[index] = cap;
+				if (SetTarget(g_cap, index, cap)) {
 					++capChanges;
-					g_transition = true;
 				}
 			}
 
@@ -624,15 +607,25 @@ namespace Shelter
 			const float dt = globals::game::deltaTime ? *globals::game::deltaTime : 0.0f;
 			const float alpha = ShelterTransition::Alpha(dt);
 			bool pending = false;
-			for (size_t i = 0; i < g_raw.size(); ++i) {
-				pending |= ShelterTransition::Advance(g_roofDisplay[i], g_raw[i], alpha);
-				pending |= ShelterTransition::Advance(g_capDisplay[i], g_cap[i], alpha);
-				const auto roof = static_cast<uint8_t>(g_roofDisplay[i] + 0.5f);
-				const auto cap = static_cast<uint8_t>(g_capDisplay[i] + 0.5f);
-				g_dirty |= roof != g_roofVisible[i];
-				g_capDirty |= cap != g_capVisible[i];
-				g_roofVisible[i] = roof;
-				g_capVisible[i] = cap;
+			// A settled texel already shows its targets and would not change, so only the
+			// fading ones are visited, and they leave the set once both have settled.
+			for (size_t word = 0; word < g_fading.size(); ++word) {
+				for (uint64_t bits = g_fading[word]; bits; bits &= bits - 1) {
+					const size_t i = word * 64 + static_cast<size_t>(std::countr_zero(bits));
+					bool fading = ShelterTransition::Advance(g_roofDisplay[i], g_raw[i], alpha);
+					fading |= ShelterTransition::Advance(g_capDisplay[i], g_cap[i], alpha);
+					const auto roof = static_cast<uint8_t>(g_roofDisplay[i] + 0.5f);
+					const auto cap = static_cast<uint8_t>(g_capDisplay[i] + 0.5f);
+					g_dirty |= roof != g_roofVisible[i];
+					g_capDirty |= cap != g_capVisible[i];
+					g_roofVisible[i] = roof;
+					g_capVisible[i] = cap;
+					if (fading) {
+						pending = true;
+					} else {
+						ClearBit(g_fading, static_cast<uint32_t>(i));
+					}
+				}
 			}
 			g_transition = pending;
 		}
