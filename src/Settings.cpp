@@ -296,6 +296,8 @@ namespace Settings
 				Clamped(key, AsFloat(key, value, 2.0f), 1.0f, 2.0f));
 		} else if (key == "ClipmapSeedSmoothing") {
 			clipmapSeedSmoothing = Clamped(key, AsFloat(key, value, 1.0f), 0.0f, 16.0f);
+		} else if (key == "ClipmapSkipIdleGroups") {
+			clipmapSkipIdleGroups = AsBool(value);
 		} else if (key == "EnableTessellationBounds") {
 			enableTessellationBounds = AsBool(value);
 		} else if (key == "TessellationBoundDepth") {
@@ -789,12 +791,12 @@ namespace Settings
 
 		logger::info(
 			"Settings: EnableTessellation={} EnableDepthPass={} Winding={} MaxFactor={} "
-			"TargetSpacing={} ZOffset={} Clipmap={} StampScale={} FootReach={} StampD={} Decay={} "
+			"TargetSpacing={} ZOffset={} Clipmap={} SkipIdle={} StampScale={} FootReach={} StampD={} Decay={} "
 			"WaveAmp={} WaveLen={} "
 			"Cull={} CullMargin={} BlendLayer={} Normals={} GradEps={} LogShaders={} "
 			"SurfaceMaterial={} Classify={} BlendStrength={}",
 			enableTessellation, enableDepthPass, tessellationWinding, tessellationMaxFactor,
-			tessellationTargetSpacing, debugWorldZOffset, useClipmap, stampRadiusScale,
+			tessellationTargetSpacing, debugWorldZOffset, useClipmap, clipmapSkipIdleGroups, stampRadiusScale,
 			stampFootReach, stampDepth, stampDecayPerSecond, debugWaveAmplitude, debugWaveLength,
 			cullDistantDraws, cullMargin, debugBlendLayer, recomputeNormals, normalGradientEpsilon,
 			logGeneratedShaders, enableSurfaceMaterial, enableSurfaceClassification,

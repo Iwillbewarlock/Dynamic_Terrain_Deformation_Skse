@@ -50,6 +50,12 @@ namespace Clipmap
 
 	static_assert(kTexels % 8 == 0, "kTexels must divide evenly by the 8x8 thread group");
 
+	// Update thread groups per axis of one level. The group list pass covers them with
+	// 8x8 threads per group, and a full list is kGroups^2 / 64 dispatch rows.
+	inline constexpr uint32_t kGroups = kTexels / 8;
+	static_assert(kGroups % 8 == 0 && kGroups * kGroups / 64 <= 65535,
+		"the group list pass and the listed dispatch must fit kGroups");
+
 	struct Stamp
 	{
 

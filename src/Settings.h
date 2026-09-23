@@ -35,6 +35,12 @@ namespace Settings
 
 	inline float clipmapSeedSmoothing{ 1.0f };
 
+	// Update only the 8x8 thread groups of the field that can change this frame. 0 runs
+	// every group every frame, still with the per-group flag bookkeeping. With repose on,
+	// whose neighbour reads race, 1 also changes which of the race's results come up
+	// (see the INFO lines of ClipmapCSBench).
+	inline bool clipmapSkipIdleGroups{ true };
+
 	inline bool enableTessellationBounds{ true };
 
 	inline float tessellationBoundDepth{ 0.25f };

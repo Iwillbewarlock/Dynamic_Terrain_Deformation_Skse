@@ -97,6 +97,9 @@ RWTexture2D<float2> DecayRate : register(u1);
 
 RWTexture2D<uint> Activity : register(u2);
 
+// One flag per 8x8 group: 1 when a texel of the group is not +0.0 after the update.
+RWTexture2D<uint> GroupLive : register(u3);
+
 Texture2D<float4> ShapeMask : register(t0);
 SamplerState      ShapeSampler : register(s0);
 
@@ -105,6 +108,14 @@ Texture2D<float2> CoarseDecay : register(t2);
 
 Texture2D<float> SnowCoverageMap : register(t3);
 Texture2D<float> SnowMeshCapMap : register(t4);
+
+#ifdef GROUP_LIST
+// The groups to update are GroupList[0, GroupCount), built by kGroupListShader, and the
+// dispatch is 64 groups wide. The slots past the count, at the end of the last row,
+// write nothing.
+StructuredBuffer<uint> GroupList : register(t5);
+ByteAddressBuffer      GroupCount : register(t6);
+#endif
 
 cbuffer Params : register(b0)
 {
@@ -300,16 +311,27 @@ float StampDistance(float2 worldXY, float4 s, float4 shape, float2 motion)
 
 		R"(
 groupshared uint gBlockMax;
+groupshared uint gNegativeZero;
 
 static const uint kStampWords = (MAX_STAMPS + 31) / 32;
 groupshared uint gStampHits[kStampWords];
 
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID,
-	uint groupIndex : SV_GroupIndex)
+	uint3 thread : SV_GroupThreadID, uint groupIndex : SV_GroupIndex)
 {
+	bool listed = true;
+#ifdef GROUP_LIST
+	const uint slot = gid.y * 64 + gid.x;
+	listed = slot < GroupCount.Load(0);
+	const uint packed = listed ? GroupList[slot] : 0;
+	gid = uint3(packed & 0xFFFF, packed >> 16, 0);
+	id = uint3(gid.xy * 8 + thread.xy, 0);
+#endif
+
 	if (groupIndex == 0) {
 		gBlockMax = 0;
+		gNegativeZero = 0;
 	}
 	if (groupIndex < kStampWords) {
 		gStampHits[groupIndex] = 0;
@@ -544,17 +566,26 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID,
 		h = max(h, -(SnowBlanket(worldXY) + Raise.z));
 	}
 
-	Field[id.xy] = h;
-	DecayRate[id.xy] = float2(rate, snow);
+	if (listed) {
+		Field[id.xy] = h;
+		DecayRate[id.xy] = float2(rate, snow);
+	}
 
-	// A max with zero changes nothing, so bare ground skips the atomics.
+	// A max with zero changes nothing, so bare ground skips the atomics. A -0.0 (a
+	// print that decayed away) still makes the group live: repose rewrites it as +0.0.
 	const uint magnitude = asuint(abs(h));
 	if (magnitude != 0) {
 		InterlockedMax(gBlockMax, magnitude);
+	} else if (asuint(h) != 0) {
+		InterlockedOr(gNegativeZero, 1u);
 	}
 	GroupMemoryBarrierWithGroupSync();
 
-	if (groupIndex == 0 && gBlockMax != 0) {
+	if (groupIndex == 0 && listed) {
+		GroupLive[gid.xy] = (gBlockMax | gNegativeZero) != 0 ? 1u : 0u;
+	}
+
+	if (groupIndex == 0 && listed && gBlockMax != 0) {
 
 		const int2 centre = int2(gid.xy / kActivityGroups);
 		for (int dy = -1; dy <= 1; ++dy) {
@@ -598,4 +629,109 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID,
 				Shelter::kWorldSize * 0.39f, Shelter::kWorldSize * 0.47f) +
 			kUpdateShader;
 	}
+
+	// Lists the groups of one level that the update can change this frame, one thread
+	// per group, for the update compiled with GROUP_LIST and run by DispatchIndirect
+	// (ClipmapSkipIdleGroups). A texel that holds +0.0 keeps it unless a stamp reaches
+	// it, the ring reseeds it, or repose pulls it towards one of its four neighbours:
+	// decay and weather fill multiply, melting needs a melt stamp, and the snow floor
+	// only lifts h < 0. So a group is listed when a stamp rectangle overlaps it (the
+	// update's own group test), when a cell of it is on the ring, or when it or a group
+	// across one of its edges was live after the last update. Any other group would
+	// write back what it holds. Its flag is cleared here; the update writes the flags
+	// of the listed groups. Params must match kUpdateShader.
+	constexpr char kGroupListShader[] = R"(
+cbuffer Params : register(b0)
+{
+	float4 Window;
+	float4 Control;
+	float4 Weather;
+	float4 Stamps[MAX_STAMPS];
+	float4 StampParams[MAX_STAMPS];
+	float4 StampShape[MAX_STAMPS];
+	float4 StampMotion[MAX_STAMPS];
+	float4 Coarse;
+	float4 RimShape;
+	float4 SnowRim;
+	float4 Raise;
+	float4 RaiseWindow;
+	float4 StampBounds[MAX_STAMPS];
+	uint4  NoNoiseMask;
+};
+
+Texture2D<uint> LiveBefore : register(t5);
+
+RWTexture2D<uint>        LiveAfter : register(u0);
+RWByteAddressBuffer      GroupArgs : register(u1);
+RWByteAddressBuffer      GroupCount : register(u2);
+RWStructuredBuffer<uint> GroupList : register(u3);
+
+groupshared uint gListed;
+groupshared uint gFirst;
+
+[numthreads(8, 8, 1)]
+void main(uint3 group : SV_DispatchThreadID, uint groupIndex : SV_GroupIndex)
+{
+	if (groupIndex == 0) {
+		gListed = 0;
+	}
+	GroupMemoryBarrierWithGroupSync();
+
+	const int n = (int)Window.w;
+	const int mask = n - 1;
+	const int2 base = int2(Window.xy) - (n >> 1);
+	const int2 first = (int2(group.xy * 8) - base) & mask;
+	const bool2 wraps = first + 7 > mask;
+
+	// The ring is every cell Coarse.w or more cells from the centre on either axis. A
+	// group across the wrap holds the window edge.
+	const int2 fromCentre = max(abs(first - (n >> 1)), abs(first + 7 - (n >> 1)));
+	bool listed = any(wraps) || max(fromCentre.x, fromCentre.y) >= (int)Coarse.w;
+
+	const int2 at = int2(group.xy);
+	const int2 wrap = (n >> 3) - 1;
+	listed = listed || LiveBefore[at] != 0 ||
+		LiveBefore[(at + int2(-1, 0)) & wrap] != 0 || LiveBefore[(at + int2(1, 0)) & wrap] != 0 ||
+		LiveBefore[(at + int2(0, -1)) & wrap] != 0 || LiveBefore[(at + int2(0, 1)) & wrap] != 0;
+
+	[branch] if (!listed) {
+		const float2 cornerA = float2(base + (wraps ? 0 : first) - 1) * Window.z;
+		const float2 cornerB = float2(base + (wraps ? mask : first + 7) + 1) * Window.z;
+		const float2 groupLo = min(cornerA, cornerB);
+		const float2 groupHi = max(cornerA, cornerB);
+
+		const int count = min((int)Control.y, MAX_STAMPS);
+		for (int i = 0; i < count && !listed; ++i) {
+			const float4 bounds = StampBounds[i];
+			listed = !(any(groupHi < bounds.xy) || any(groupLo > bounds.zw));
+		}
+	}
+
+	uint slot = 0;
+	if (listed) {
+		InterlockedAdd(gListed, 1u, slot);
+	} else {
+		LiveAfter[group.xy] = 0;
+	}
+	GroupMemoryBarrierWithGroupSync();
+
+	// One global add per 64 groups. The update dispatch is 64 wide; the rows each
+	// block of slots opens add up to ceil(count / 64) in whatever order they land.
+	if (groupIndex == 0 && gListed != 0) {
+		uint firstSlot;
+		GroupCount.InterlockedAdd(0, gListed, firstSlot);
+		const uint rows = (firstSlot + gListed + 63) / 64 - (firstSlot + 63) / 64;
+		if (rows != 0) {
+			uint rowsBefore;
+			GroupArgs.InterlockedAdd(4, rows, rowsBefore);
+		}
+		gFirst = firstSlot;
+	}
+	GroupMemoryBarrierWithGroupSync();
+
+	if (listed) {
+		GroupList[gFirst + slot] = group.x | (group.y << 16);
+	}
+}
+)";
 }

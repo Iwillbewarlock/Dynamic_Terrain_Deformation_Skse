@@ -87,8 +87,31 @@ namespace Clipmap
 		ID3D11Texture2D*           g_activity[kMaxLevels]{};
 		ID3D11UnorderedAccessView* g_activityUAV[kMaxLevels]{};
 		ID3D11ShaderResourceView*  g_activitySRV[kMaxLevels]{};
+
+		// GroupLive flags, one per update group. An update reads [parity] (through the
+		// group list pass) and writes [parity ^ 1], then the parity flips. Known once an
+		// update has written every flag of the level.
+		ID3D11Texture2D*           g_live[kMaxLevels][2]{};
+		ID3D11UnorderedAccessView* g_liveUAV[kMaxLevels][2]{};
+		ID3D11ShaderResourceView*  g_liveSRV[kMaxLevels][2]{};
+		uint32_t                   g_liveParity[kMaxLevels]{};
+		bool                       g_liveKnown[kMaxLevels]{};
+
+		// The group list, its count and the DispatchIndirect arguments, shared by the
+		// levels, which update one after the other.
+		ID3D11ComputeShader*       g_groupListCS{ nullptr };
+		ID3D11Buffer*              g_groupList{ nullptr };
+		ID3D11UnorderedAccessView* g_groupListUAV{ nullptr };
+		ID3D11ShaderResourceView*  g_groupListSRV{ nullptr };
+		ID3D11Buffer*              g_groupCount{ nullptr };
+		ID3D11UnorderedAccessView* g_groupCountUAV{ nullptr };
+		ID3D11ShaderResourceView*  g_groupCountSRV{ nullptr };
+		ID3D11Buffer*              g_groupArgs{ nullptr };
+		ID3D11UnorderedAccessView* g_groupArgsUAV{ nullptr };
+
 		ID3D11SamplerState*        g_sampler{ nullptr };
 		ID3D11ComputeShader*       g_updateCS{ nullptr };
+		ID3D11ComputeShader*       g_updateListedCS{ nullptr };
 		ID3D11Buffer*              g_paramsCB{ nullptr };
 		ID3D11Buffer*              g_windowCB{ nullptr };
 		bool                       g_failed{ false };
@@ -102,6 +125,10 @@ namespace Clipmap
 		float g_windowHalfExtent{ 0.0f };
 		bool  g_windowValid{ false };
 
+		// Slots the update and group list passes bind: u0-u3 and t0-t6.
+		constexpr UINT kComputeUAVs = 4;
+		constexpr UINT kComputeSRVs = 7;
+
 		struct ComputeStageGuard
 		{
 			explicit ComputeStageGuard(ID3D11DeviceContext* a_context) :
@@ -109,19 +136,19 @@ namespace Clipmap
 			{
 				_context->CSGetShader(&_shader, nullptr, nullptr);
 				_context->CSGetConstantBuffers(0, 1, &_cb);
-				_context->CSGetUnorderedAccessViews(0, 3, _uav);
-				_context->CSGetShaderResources(0, 5, _srv);
+				_context->CSGetUnorderedAccessViews(0, kComputeUAVs, _uav);
+				_context->CSGetShaderResources(0, kComputeSRVs, _srv);
 				_context->CSGetSamplers(0, 1, &_sampler);
 			}
 
 			~ComputeStageGuard()
 			{
-				const UINT noOffset[3] = { static_cast<UINT>(-1), static_cast<UINT>(-1),
-					static_cast<UINT>(-1) };
+				const UINT noOffset[kComputeUAVs] = { static_cast<UINT>(-1), static_cast<UINT>(-1),
+					static_cast<UINT>(-1), static_cast<UINT>(-1) };
 				_context->CSSetShader(_shader, nullptr, 0);
 				_context->CSSetConstantBuffers(0, 1, &_cb);
-				_context->CSSetUnorderedAccessViews(0, 3, _uav, noOffset);
-				_context->CSSetShaderResources(0, 5, _srv);
+				_context->CSSetUnorderedAccessViews(0, kComputeUAVs, _uav, noOffset);
+				_context->CSSetShaderResources(0, kComputeSRVs, _srv);
 				_context->CSSetSamplers(0, 1, &_sampler);
 
 				if (_shader) {
@@ -151,11 +178,11 @@ namespace Clipmap
 		private:
 			ID3D11DeviceContext*       _context;
 
-			ID3D11ShaderResourceView*  _srv[5]{};
+			ID3D11ShaderResourceView*  _srv[kComputeSRVs]{};
 			ID3D11SamplerState*        _sampler{ nullptr };
 			ID3D11ComputeShader*       _shader{ nullptr };
 			ID3D11Buffer*              _cb{ nullptr };
-			ID3D11UnorderedAccessView* _uav[3]{};
+			ID3D11UnorderedAccessView* _uav[kComputeUAVs]{};
 		};
 
 		bool CreateLevel(ID3D11Device* a_device, uint32_t a_level)
@@ -254,6 +281,30 @@ namespace Clipmap
 				return false;
 			}
 
+			// Zero, like the field. The first update still runs every group and writes
+			// every flag.
+			D3D11_TEXTURE2D_DESC liveDesc = activityDesc;
+			liveDesc.Width = kGroups;
+			liveDesc.Height = kGroups;
+
+			const std::vector<uint32_t> liveZeros(static_cast<size_t>(kGroups) * kGroups, 0);
+			D3D11_SUBRESOURCE_DATA      liveInitial{};
+			liveInitial.pSysMem = liveZeros.data();
+			liveInitial.SysMemPitch = kGroups * sizeof(uint32_t);
+
+			for (uint32_t i = 0; i < 2; ++i) {
+				if (FAILED(a_device->CreateTexture2D(&liveDesc, &liveInitial, &g_live[a_level][i])) ||
+					FAILED(a_device->CreateUnorderedAccessView(
+						g_live[a_level][i], nullptr, &g_liveUAV[a_level][i])) ||
+					FAILED(a_device->CreateShaderResourceView(
+						g_live[a_level][i], nullptr, &g_liveSRV[a_level][i]))) {
+					logger::error("Clipmap: group flags unavailable for level {}", a_level);
+					return false;
+				}
+			}
+			g_liveParity[a_level] = 0;
+			g_liveKnown[a_level] = false;
+
 			logger::info("Clipmap level {}: {}x{} texels over {:.0f} world units "
 						 "({:.2f} per cell, +/- {:.1f} m)",
 				a_level, kTexels, kTexels, WorldSizeFor(a_level), CellSizeFor(a_level),
@@ -261,25 +312,25 @@ namespace Clipmap
 			return true;
 		}
 
-		bool CompileUpdateShader(ID3D11Device* a_device)
+		bool CompileComputeShader(ID3D11Device* a_device, const std::string& a_source,
+			const char* a_name, ID3D11ComputeShader** a_out, bool a_groupList = false)
 		{
 			ID3DBlob* code = nullptr;
 			ID3DBlob* errors = nullptr;
 
-			const std::string source = UpdateShaderSource();
-
 			const std::string maxStamps = std::to_string(kMaxStamps);
 			const D3D_SHADER_MACRO defines[] = {
 				{ "MAX_STAMPS", maxStamps.c_str() },
+				{ a_groupList ? "GROUP_LIST" : nullptr, "1" },  // a null name ends the list
 				{ nullptr, nullptr }
 			};
 
 			const HRESULT hr = ::D3DCompile(
-				source.c_str(), source.size(), "ClipmapUpdateCS", defines, nullptr,
+				a_source.c_str(), a_source.size(), a_name, defines, nullptr,
 				"main", "cs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &errors);
 
 			if (FAILED(hr)) {
-				logger::error("Clipmap update CS failed to compile: {}",
+				logger::error("{} failed to compile: {}", a_name,
 					errors ? static_cast<const char*>(errors->GetBufferPointer()) : "no message");
 				if (errors) {
 					errors->Release();
@@ -291,14 +342,68 @@ namespace Clipmap
 			}
 
 			const HRESULT createHr = a_device->CreateComputeShader(
-				code->GetBufferPointer(), code->GetBufferSize(), nullptr, &g_updateCS);
+				code->GetBufferPointer(), code->GetBufferSize(), nullptr, a_out);
 			code->Release();
 
 			if (FAILED(createHr)) {
-				logger::error("Clipmap: CreateComputeShader failed");
+				logger::error("Clipmap: CreateComputeShader failed for {}", a_name);
 				return false;
 			}
 			return true;
+		}
+
+		// The buffers of the group list pass. The count and the arguments take raw
+		// views so the pass can InterlockedAdd into them; the update reads the count
+		// through its own raw view, and the arguments buffer is only ever a UAV and the
+		// DispatchIndirect source. All of it is Direct3D 11.0 core.
+		bool CreateGroupList(ID3D11Device* a_device)
+		{
+			D3D11_BUFFER_DESC desc{};
+			desc.ByteWidth = kGroups * kGroups * sizeof(uint32_t);
+			desc.Usage = D3D11_USAGE_DEFAULT;
+			desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
+			desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+			desc.StructureByteStride = sizeof(uint32_t);
+
+			if (FAILED(a_device->CreateBuffer(&desc, nullptr, &g_groupList)) ||
+				FAILED(a_device->CreateUnorderedAccessView(g_groupList, nullptr, &g_groupListUAV)) ||
+				FAILED(a_device->CreateShaderResourceView(g_groupList, nullptr, &g_groupListSRV))) {
+				return false;
+			}
+
+			D3D11_UNORDERED_ACCESS_VIEW_DESC rawUAV{};
+			rawUAV.Format = DXGI_FORMAT_R32_TYPELESS;
+			rawUAV.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+			rawUAV.Buffer.NumElements = 4;
+			rawUAV.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
+
+			D3D11_SHADER_RESOURCE_VIEW_DESC rawSRV{};
+			rawSRV.Format = DXGI_FORMAT_R32_TYPELESS;
+			rawSRV.ViewDimension = D3D11_SRV_DIMENSION_BUFFEREX;
+			rawSRV.BufferEx.NumElements = 4;
+			rawSRV.BufferEx.Flags = D3D11_BUFFEREX_SRV_FLAG_RAW;
+
+			desc.ByteWidth = 4 * sizeof(uint32_t);
+			desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
+			desc.StructureByteStride = 0;
+
+			if (FAILED(a_device->CreateBuffer(&desc, nullptr, &g_groupCount)) ||
+				FAILED(a_device->CreateUnorderedAccessView(g_groupCount, &rawUAV, &g_groupCountUAV)) ||
+				FAILED(a_device->CreateShaderResourceView(g_groupCount, &rawSRV, &g_groupCountSRV))) {
+				return false;
+			}
+
+			desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+			desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS |
+				D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS;
+
+			if (FAILED(a_device->CreateBuffer(&desc, nullptr, &g_groupArgs)) ||
+				FAILED(a_device->CreateUnorderedAccessView(g_groupArgs, &rawUAV, &g_groupArgsUAV))) {
+				return false;
+			}
+
+			return CompileComputeShader(a_device, kGroupListShader, "ClipmapGroupListCS",
+				&g_groupListCS);
 		}
 
 		void CollectActors(std::vector<RE::ActorPtr>& a_out)
@@ -702,8 +807,14 @@ namespace Clipmap
 			return fail("CreateBuffer (window) failed");
 		}
 
-		if (!CompileUpdateShader(device)) {
+		const std::string update = UpdateShaderSource();
+		if (!CompileComputeShader(device, update, "ClipmapUpdateCS", &g_updateCS) ||
+			!CompileComputeShader(device, update, "ClipmapUpdateCS (group list)", &g_updateListedCS, true)) {
 			return fail("update shader unavailable");
+		}
+
+		if (!CreateGroupList(device)) {
+			return fail("group list unavailable");
 		}
 
 		logger::info("Clipmap ready: {} level(s), marks survive to {:.0f} world units "
@@ -725,10 +836,27 @@ namespace Clipmap
 		drop(g_windowCB);
 		drop(g_paramsCB);
 		drop(g_updateCS);
+		drop(g_updateListedCS);
 		drop(g_sampler);
+
+		drop(g_groupListCS);
+		drop(g_groupArgsUAV);
+		drop(g_groupArgs);
+		drop(g_groupCountSRV);
+		drop(g_groupCountUAV);
+		drop(g_groupCount);
+		drop(g_groupListSRV);
+		drop(g_groupListUAV);
+		drop(g_groupList);
 
 		for (uint32_t level = 0; level < kMaxLevels; ++level) {
 			g_prevWindowValid[level] = false;
+			g_liveKnown[level] = false;
+			for (uint32_t i = 0; i < 2; ++i) {
+				drop(g_liveSRV[level][i]);
+				drop(g_liveUAV[level][i]);
+				drop(g_live[level][i]);
+			}
 			drop(g_activitySRV[level]);
 			drop(g_activityUAV[level]);
 			drop(g_activity[level]);
@@ -888,8 +1016,8 @@ namespace Clipmap
 		{
 			const ComputeStageGuard guard(context);
 
-			const UINT noOffset[3] = { static_cast<UINT>(-1), static_cast<UINT>(-1),
-				static_cast<UINT>(-1) };
+			const UINT noOffset[kComputeUAVs] = { static_cast<UINT>(-1), static_cast<UINT>(-1),
+				static_cast<UINT>(-1), static_cast<UINT>(-1) };
 
 			ID3D11ShaderResourceView* shape = StampShapes::View();
 			context->CSSetShaderResources(0, 1, &shape);
@@ -907,13 +1035,12 @@ namespace Clipmap
 			context->CSSetShaderResources(3, 2, floorMaps);
 
 			context->CSSetSamplers(0, 1, &g_sampler);
-			context->CSSetShader(g_updateCS, nullptr, 0);
 
 			Profiler::GpuBegin(Profiler::Scope::kClipmap);
 
 			for (uint32_t i = 0; i < levels; ++i) {
 				const uint32_t level = levels - 1 - i;
-				if (!g_uav[level] || !g_decayUAV[level]) {
+				if (!g_uav[level] || !g_decayUAV[level] || !g_liveSRV[level][1]) {
 					continue;
 				}
 
@@ -943,6 +1070,14 @@ namespace Clipmap
 				params.coarse[3] = std::clamp(params.control[2] - static_cast<float>(moved) - 2.0f,
 					0.0f, params.control[2]);
 
+				// Only the groups that can change run, from a list built on the GPU
+				// (kGroupListShader). Every group runs while the flags are not known yet
+				// and when the whole window reseeds (a jump, or the first update after
+				// indoors), which would list every group anyway.
+				const uint32_t parity = g_liveParity[level];
+				const bool     listed = Settings::clipmapSkipIdleGroups && g_liveKnown[level] &&
+					params.coarse[3] > 0.0f;
+
 				ID3D11ShaderResourceView* seeds[2] = {
 					hasCoarser ? g_srv[level + 1] : nullptr,
 					hasCoarser ? g_decaySRV[level + 1] : nullptr
@@ -959,17 +1094,45 @@ namespace Clipmap
 				const UINT zero[4] = { 0, 0, 0, 0 };
 				context->ClearUnorderedAccessViewUint(g_activityUAV[level], zero);
 
-				ID3D11UnorderedAccessView* uavs[3] = { g_uav[level], g_decayUAV[level],
-					g_activityUAV[level] };
 				context->CSSetConstantBuffers(0, 1, &g_paramsCB);
-				context->CSSetUnorderedAccessViews(0, 3, uavs, noOffset);
-				context->Dispatch(kTexels / 8, kTexels / 8, 1);
 
-				ID3D11UnorderedAccessView* nullUAVs[3] = { nullptr, nullptr, nullptr };
-				context->CSSetUnorderedAccessViews(0, 3, nullUAVs, noOffset);
+				if (listed) {
+					const UINT args[4] = { 64, 0, 1, 0 };
+					context->UpdateSubresource(g_groupArgs, 0, nullptr, args, 0, 0);
+					context->UpdateSubresource(g_groupCount, 0, nullptr, zero, 0, 0);
 
-				ID3D11ShaderResourceView* nullSeeds[2] = { nullptr, nullptr };
-				context->CSSetShaderResources(1, 2, nullSeeds);
+					ID3D11UnorderedAccessView* listUAVs[kComputeUAVs] = { g_liveUAV[level][parity ^ 1],
+						g_groupArgsUAV, g_groupCountUAV, g_groupListUAV };
+					context->CSSetShader(g_groupListCS, nullptr, 0);
+					context->CSSetShaderResources(5, 1, &g_liveSRV[level][parity]);
+					context->CSSetUnorderedAccessViews(0, kComputeUAVs, listUAVs, noOffset);
+					context->Dispatch(kGroups / 8, kGroups / 8, 1);
+
+					ID3D11UnorderedAccessView* nullUAVs[kComputeUAVs] = {};
+					context->CSSetUnorderedAccessViews(0, kComputeUAVs, nullUAVs, noOffset);
+
+					ID3D11ShaderResourceView* list[2] = { g_groupListSRV, g_groupCountSRV };
+					context->CSSetShaderResources(5, 2, list);
+				}
+
+				ID3D11UnorderedAccessView* uavs[kComputeUAVs] = { g_uav[level], g_decayUAV[level],
+					g_activityUAV[level], g_liveUAV[level][parity ^ 1] };
+				context->CSSetShader(listed ? g_updateListedCS : g_updateCS, nullptr, 0);
+				context->CSSetUnorderedAccessViews(0, kComputeUAVs, uavs, noOffset);
+				if (listed) {
+					context->DispatchIndirect(g_groupArgs, 0);
+				} else {
+					context->Dispatch(kGroups, kGroups, 1);
+				}
+				g_liveParity[level] = parity ^ 1;
+				g_liveKnown[level] = true;
+
+				ID3D11UnorderedAccessView* nullUAVs[kComputeUAVs] = {};
+				context->CSSetUnorderedAccessViews(0, kComputeUAVs, nullUAVs, noOffset);
+
+				ID3D11ShaderResourceView* nullPair[2] = { nullptr, nullptr };
+				context->CSSetShaderResources(1, 2, nullPair);
+				context->CSSetShaderResources(5, 2, nullPair);
 			}
 
 			ID3D11ShaderResourceView* nullFloor[2] = { nullptr, nullptr };

@@ -152,31 +152,32 @@ namespace
 		}
 	}
 
-	void GenerateCompute(const std::filesystem::path& a_outDir)
+	void GenerateCompute(const std::filesystem::path& a_outDir, const std::string& a_source,
+		const char* a_name, const char* a_label, bool a_groupList = false)
 	{
 		const std::string maxStamps = std::to_string(Clipmap::kMaxStamps);
 		const D3D_SHADER_MACRO defines[] = {
 			{ "MAX_STAMPS", maxStamps.c_str() },
+			{ a_groupList ? "GROUP_LIST" : nullptr, "1" },  // a null name ends the list
 			{ nullptr, nullptr }
 		};
 
-		const std::string source(Clipmap::UpdateShaderSource());
-		const auto        path = a_outDir / "clipmap_update.hlsl";
-		std::ofstream(path) << source;
+		const auto path = a_outDir / (std::string(a_label) + ".hlsl");
+		std::ofstream(path) << a_source;
 
 		ID3DBlob* code = nullptr;
 		ID3DBlob* errors = nullptr;
 
-		const HRESULT hr = D3DCompile(source.c_str(), source.size(), "ClipmapUpdateCS",
+		const HRESULT hr = D3DCompile(a_source.c_str(), a_source.size(), a_name,
 			defines, nullptr, "main", "cs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code,
 			&errors);
 
 		if (SUCCEEDED(hr)) {
-			std::printf("  PASS  %-28s %-7s %6zu bytes -> %s\n", "clipmap_update",
+			std::printf("  PASS  %-28s %-7s %6zu bytes -> %s\n", a_label,
 				"cs_5_0", code->GetBufferSize(), path.string().c_str());
 		} else {
 			++g_failures;
-			std::printf("  FAIL  %-28s %-7s hr=0x%08X -> %s\n", "clipmap_update",
+			std::printf("  FAIL  %-28s %-7s hr=0x%08X -> %s\n", a_label,
 				"cs_5_0", static_cast<uint32_t>(hr), path.string().c_str());
 			if (errors) {
 				std::printf("%.*s\n", static_cast<int>(errors->GetBufferSize()),
@@ -487,7 +488,9 @@ int main(int a_argc, char** a_argv)
 	Settings::enableSurfaceMaterial = true;
 
 	std::printf("Clipmap update pass\n");
-	GenerateCompute(outDir);
+	GenerateCompute(outDir, Clipmap::UpdateShaderSource(), "ClipmapUpdateCS", "clipmap_update");
+	GenerateCompute(outDir, Clipmap::UpdateShaderSource(), "ClipmapUpdateCS", "clipmap_update_listed", true);
+	GenerateCompute(outDir, Clipmap::kGroupListShader, "ClipmapGroupListCS", "clipmap_group_list");
 	GenerateShapeAnalysis(outDir);
 
 	std::printf("\nDefault configuration (clipmap, normals, surface material)\n");
