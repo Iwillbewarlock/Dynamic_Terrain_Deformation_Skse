@@ -36,6 +36,14 @@ namespace Profiler
 		kStaticSeen,
 		kStaticRouted,
 		kShaderBuilds,
+
+		// Every SetupGeometry call the hooks see, and how many of them went on to the full
+		// routing path instead of returning at the land and blood test.
+		kHookedLighting,
+		kHookedLightingFull,
+		kHookedDepth,
+		kHookedOtherUtility,
+		kHookedUtilityFull,
 		kCount
 	};
 

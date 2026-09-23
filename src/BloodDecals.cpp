@@ -223,13 +223,22 @@ namespace BloodDecals
 		}
 	}
 
-	bool Contains(RE::BSGeometry* geometry)
+	bool MaybeTarget(RE::BSGeometry* geometry)
 	{
 		if (!Settings::enableBloodDecals || !geometry) { return false; }
-		if (targets.contains(geometry)) { return true; }
 		auto* property = geometry->GetGeometryRuntimeData().shaderProperty.get();
 		using Flag = RE::BSShaderProperty::EShaderPropertyFlag;
-		if (!property || !property->flags.any(Flag::kDecal, Flag::kDynamicDecal)) { return false; }
+		return (property && property->flags.any(Flag::kDecal, Flag::kDynamicDecal)) ||
+			(!targets.empty() && targets.contains(geometry));
+	}
+
+	bool Contains(RE::BSGeometry* geometry)
+	{
+		// The draw hooks skip every draw MaybeTarget() turns down, so a new way for a draw to
+		// become a target has to be added there, not here.
+		if (!MaybeTarget(geometry)) { return false; }
+		if (targets.contains(geometry)) { return true; }
+		auto* property = geometry->GetGeometryRuntimeData().shaderProperty.get();
 
 		auto* parent = geometry->parent;
 		for (unsigned depth = 0; parent && depth < 8; ++depth, parent = parent->parent) {

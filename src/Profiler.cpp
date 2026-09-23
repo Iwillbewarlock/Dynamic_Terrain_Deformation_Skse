@@ -561,6 +561,12 @@ namespace Profiler
 				count(Count::kDepthShadowSkipped));
 			logger::info("  Routing actors    {:5.1f} draws/frame painted",
 				count(Count::kActorRouted));
+			logger::info("  Hooked draws      lighting {:6.0f}  camera depth {:6.0f}  other utility "
+						 "{:6.0f} per frame | past the land/blood test: {:.0f} lighting, {:.0f} "
+						 "utility",
+				count(Count::kHookedLighting), count(Count::kHookedDepth),
+				count(Count::kHookedOtherUtility), count(Count::kHookedLightingFull),
+				count(Count::kHookedUtilityFull));
 
 			const double staticSeen = count(Count::kStaticSeen);
 			if (staticSeen > 0.0) {

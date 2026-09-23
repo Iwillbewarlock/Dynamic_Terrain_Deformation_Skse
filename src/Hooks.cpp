@@ -832,6 +832,64 @@ namespace Hooks
 			return true;
 		}
 
+		// Set once in Install. GetSingleton() is a fixed object in the game's data, so this is
+		// the state Describe() reads.
+		RE::BSGraphics::RendererShadowState::FLAT_RUNTIME_DATA* g_shadowState{ nullptr };
+
+		bool NearLand(RE::BSRenderPass* a_pass)
+		{
+			auto* property = a_pass ? a_pass->shaderProperty : nullptr;
+			auto* material = property ? property->GetBaseMaterial() : nullptr;
+			return material && material->GetFeature() == kNearLand;
+		}
+
+		// With the draw logs, the static probe, mesh raise and actor paint off, the Route()
+		// functions below route only near land and blood decals, and leave any other draw having
+		// done nothing but the camera test. The setup hooks drop those draws before that test and
+		// Describe(), which cost more than the rest of the hook. A new kind of routed draw has to
+		// be added here, or its setting to the NeedsFullPath() lists.
+		bool MayRoute(RE::BSRenderPass* a_pass)
+		{
+			return a_pass && (NearLand(a_pass) || BloodDecals::MaybeTarget(a_pass->geometry));
+		}
+
+		bool LightingNeedsFullPath()
+		{
+			return Settings::logDraws || Settings::logActorDraws || Settings::enableStaticProbe ||
+			       Settings::enableMeshRaise || Settings::enableActorPaint;
+		}
+
+		bool UtilityNeedsFullPath()
+		{
+			return Settings::logDraws || Settings::enableMeshRaise ||
+			       (Settings::enableStaticProbe && Settings::staticProbeOffset != 0.0f);
+		}
+
+		// Hooked draws this frame for the profiler report, counted only while it is on.
+		struct HookedDraws
+		{
+			uint32_t lighting{ 0 };
+			uint32_t lightingFull{ 0 };
+			uint32_t depth{ 0 };
+			uint32_t otherUtility{ 0 };
+			uint32_t utilityFull{ 0 };
+		};
+
+		HookedDraws g_hooked{};
+		bool        g_profiling{ false };
+
+		void FlushHookedDraws()
+		{
+			if (g_profiling) {
+				Profiler::Tally(Profiler::Count::kHookedLighting, g_hooked.lighting);
+				Profiler::Tally(Profiler::Count::kHookedLightingFull, g_hooked.lightingFull);
+				Profiler::Tally(Profiler::Count::kHookedDepth, g_hooked.depth);
+				Profiler::Tally(Profiler::Count::kHookedOtherUtility, g_hooked.otherUtility);
+				Profiler::Tally(Profiler::Count::kHookedUtilityFull, g_hooked.utilityFull);
+			}
+			g_hooked = {};
+		}
+
 		struct BSLightingShader_SetupGeometry
 		{
 			static void thunk(RE::BSShader* a_shader, RE::BSRenderPass* a_pass, uint32_t a_flags)
@@ -839,6 +897,25 @@ namespace Hooks
 
 				func(a_shader, a_pass, a_flags);
 
+				if (g_profiling) {
+					++g_hooked.lighting;
+				}
+
+				if (!LightingNeedsFullPath() &&
+					(!Settings::enableTessellation || !MayRoute(a_pass))) {
+					return;
+				}
+
+				if (g_profiling) {
+					++g_hooked.lightingFull;
+				}
+
+				Route(a_pass);
+			}
+
+			// Out of line, so that the draws dropped above do not pay for its stack frame.
+			__declspec(noinline) static void Route(RE::BSRenderPass* a_pass)
+			{
 				Observe("Lighting", a_pass);
 
 				if (Settings::logActorDraws) {
@@ -969,6 +1046,38 @@ namespace Hooks
 			{
 				func(a_shader, a_pass, a_flags);
 
+				auto*      vs = g_shadowState ? g_shadowState->currentVertexShader : nullptr;
+				const bool cameraDepth = UtilityRouting::IsCameraDepth(vs ? vs->id : 0);
+
+				if (g_profiling) {
+					++(cameraDepth ? g_hooked.depth : g_hooked.otherUtility);
+				}
+
+				if (!UtilityNeedsFullPath()) {
+					if (!Settings::enableTessellation || !Settings::enableDepthPass) {
+						return;
+					}
+					if (!cameraDepth) {
+						// The tally Route() makes for a shadow-map land draw.
+						if (g_profiling && NearLand(a_pass)) {
+							Profiler::Tally(Profiler::Count::kDepthShadowSkipped);
+						}
+						return;
+					}
+					if (!MayRoute(a_pass)) {
+						return;
+					}
+				}
+
+				if (g_profiling) {
+					++g_hooked.utilityFull;
+				}
+
+				Route(a_pass);
+			}
+
+			__declspec(noinline) static void Route(RE::BSRenderPass* a_pass)
+			{
 				Observe("Utility", a_pass);
 
 				if (!Settings::enableTessellation || !Settings::enableDepthPass) {
@@ -1120,7 +1229,10 @@ namespace Hooks
 					ApplyReloadedSettings();
 				}
 
+				FlushHookedDraws();
 				Profiler::Frame(dt);
+				// Frame() is the only place the profiler turns on or off.
+				g_profiling = Profiler::Enabled();
 				Tessellation::PrepareFrame();
 
 				StampShapes::Analyse();
@@ -1178,6 +1290,8 @@ namespace Hooks
 			return;
 		}
 		g_installed = true;
+
+		g_shadowState = &RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
 
 		REL::Relocation<std::uintptr_t> lighting{ RE::VTABLE_BSLightingShader[0] };
 		BSLightingShader_SetupGeometry::func =
