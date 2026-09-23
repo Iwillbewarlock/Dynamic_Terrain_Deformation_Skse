@@ -59,6 +59,7 @@ namespace
 		float snowRim[4]{};
 		float raise[4]{};
 		float raiseWindow[4]{};
+		float stampBounds[kStamps][4]{};  // read only by the current shader
 	};
 	static_assert(sizeof(Params) % 16 == 0);
 
@@ -544,6 +545,7 @@ namespace
 					}
 				}
 			}
+			Clipmap::FillStampBounds(p, static_cast<uint32_t>(count));
 
 			for (uint32_t i = 0; i < kLevels; ++i) {
 				const uint32_t level = kLevels - 1 - i;
@@ -900,6 +902,7 @@ namespace
 			p.stampShape[i][2] = halfWidth;
 			p.stampShape[i][3] = 1.0f;
 		}
+		Clipmap::FillStampBounds(p, static_cast<uint32_t>(a_count));
 		for (uint32_t level = 0; level < kLevels; ++level) {
 			const float cell = Clipmap::CellSizeFor(level);
 			a_levels[level] = p;

@@ -61,6 +61,8 @@ namespace Clipmap
 			float raise[4]{};
 
 			float raiseWindow[4]{};
+
+			float stampBounds[kMaxStamps][4]{};
 		};
 		static_assert(sizeof(ParamsCB) % 16 == 0);
 
@@ -815,6 +817,7 @@ namespace Clipmap
 			params.stampMotion[i][1] = stamps[i].motionY;
 			params.stampMotion[i][2] = stamps[i].snow ? 1.0f : 0.0f;
 		}
+		FillStampBounds(params, count);
 
 		auto* context = globals::d3d::context;
 

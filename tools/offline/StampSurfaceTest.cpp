@@ -43,6 +43,7 @@ struct Params
 
 	float raise[4]{ 0, 1, 0, 0 };
 	float raiseWindow[4]{ 0, 0, 1.0e6f, 2.0e6f };
+	float stampBounds[Clipmap::kMaxStamps][4]{};
 	Params()
 	{
 		stamps[0][2] = 5;
@@ -274,7 +275,9 @@ RWTexture2D<float> Result : register(u0);
 	}
 	void Step(const Params& params, bool seed = false)
 	{
-		context->UpdateSubresource(cb.Get(), 0, nullptr, &params, 0, 0);
+		Params filled = params;
+		Clipmap::FillStampBounds(filled, Clipmap::kMaxStamps);
+		context->UpdateSubresource(cb.Get(), 0, nullptr, &filled, 0, 0);
 		ID3D11UnorderedAccessView* uavs[]{ heightUAV.Get(), metaUAV.Get(), activityUAV.Get() };
 		ID3D11ShaderResourceView* srvs[]{ nullptr, seed ? coarseHeight.Get() : nullptr,
 			seed ? coarseMeta.Get() : nullptr, coverageSRV.Get(), meshCapSRV.Get() };

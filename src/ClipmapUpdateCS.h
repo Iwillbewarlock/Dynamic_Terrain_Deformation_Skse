@@ -37,6 +37,36 @@ namespace Clipmap
 		return a_rim * band - a_depth * core;
 	}
 
+	// Fills StampBounds from the stamp rows and rim settings already in a_params: per
+	// stamp, the world rectangle (min x, min y, max x, max y) that the texel reach test
+	// in the update shader lets through, rim and swept span included. The shader
+	// rejects thread groups against it. A group corner is a float, so it compares past
+	// the rounded bound only when it is past the exact one, and the corners sit a cell
+	// outside the group's texels: far more than a texel's own rounding of its distance,
+	// or the rounding of reach here against the shader's. Where a NaN makes std::max or
+	// std::clamp disagree with the shader's max and saturate, the bound comes out NaN,
+	// which rejects nothing.
+	template <class CB>
+	void FillStampBounds(CB& a_params, uint32_t a_count)
+	{
+		for (uint32_t i = 0; i < a_count; ++i) {
+			const float* s = a_params.stamps[i];
+			const float* motion = a_params.stampMotion[i];
+
+			const bool  snow = motion[2] > 0.5f;
+			const float span = snow ? a_params.snowRim[0] : a_params.control[3];
+			const float lean = snow ? a_params.snowRim[2] : a_params.rimShape[0];
+
+			const float reach = std::max(s[2], a_params.stampShape[i][2]) *
+				(1.0f + std::max(span, 0.0f) * (1.0f + std::clamp(lean, 0.0f, 1.0f)));
+
+			a_params.stampBounds[i][0] = s[0] + (std::min(0.0f, -motion[0]) - reach);
+			a_params.stampBounds[i][1] = s[1] + (std::min(0.0f, -motion[1]) - reach);
+			a_params.stampBounds[i][2] = s[0] + (std::max(0.0f, -motion[0]) + reach);
+			a_params.stampBounds[i][3] = s[1] + (std::max(0.0f, -motion[1]) + reach);
+		}
+	}
+
 	constexpr char kUpdateShader[] = R"(
 RWTexture2D<float> Field : register(u0);
 
@@ -79,6 +109,8 @@ cbuffer Params : register(b0)
 	float4 Raise;
 
 	float4 RaiseWindow;
+
+	float4 StampBounds[MAX_STAMPS];
 };
 
 )"
@@ -303,7 +335,9 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID,
 	{
 		// Each thread tests one stamp against every cell this group covers (the
 		// whole window when the group straddles the wrap), padded by a cell so float
-		// rounding can never drop a stamp that a texel below would accept.
+		// rounding can never drop a stamp that a texel below would accept. The CPU
+		// turns the texel test below into one rectangle per stamp (FillStampBounds),
+		// so a thread reads one row here instead of three.
 		const int2 first = (int2(gid.xy * 8) - base) & mask;
 		const bool2 wraps = first + 7 > mask;
 		const float2 cornerA = float2(base + (wraps ? 0 : first) - 1) * Window.z;
@@ -312,16 +346,8 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID,
 		const float2 groupHi = max(cornerA, cornerB);
 
 		for (int i = (int)groupIndex; i < count; i += 64) {
-			const float4 s = Stamps[i];
-			const float2 motion = StampMotion[i].xy;
-			const float4 rim = StampMotion[i].z > 0.5f ? SnowRim :
-				float4(Control.w, Weather.w, RimShape.x, RimShape.y);
-
-			const float reach = max(s.z, StampShape[i].z) *
-				(1.0f + max(rim.x, 0.0f) * (1.0f + saturate(rim.z)));
-			const float2 lo = min(0.0f.xx, -motion) - reach;
-			const float2 hi = max(0.0f.xx, -motion) + reach;
-			if (any(groupHi - s.xy < lo) || any(groupLo - s.xy > hi)) {
+			const float4 bounds = StampBounds[i];
+			if (any(groupHi < bounds.xy) || any(groupLo > bounds.zw)) {
 				continue;
 			}
 			InterlockedOr(gStampHits[i >> 5], 1u << (i & 31));
