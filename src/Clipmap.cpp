@@ -70,6 +70,8 @@ namespace Clipmap
 			float raiseWindow[4]{};
 
 			float stampBounds[kMaxStamps][4]{};
+
+			uint32_t noNoiseMask[4]{};
 		};
 		static_assert(sizeof(ParamsCB) % 16 == 0);
 

@@ -46,19 +46,42 @@ namespace Clipmap
 	// or the rounding of reach here against the shader's. Where a NaN makes std::max or
 	// std::clamp disagree with the shader's max and saturate, the bound comes out NaN,
 	// which rejects nothing.
+	//
+	// A melt has no rim. When it is round (half width 0) and 0 <= shoulder < 1, its
+	// weight 1 - smoothstep(r * shoulder, r, d) is exactly 0 from d >= r on, so its
+	// rectangle stops at the radius and swept span. Any other melt keeps the rim reach.
+	//
+	// Also fills NoNoiseMask with the melt and print stamps: only the press branch reads
+	// the rim and churn noise, so a group that only those reach skips it.
 	template <class CB>
 	void FillStampBounds(CB& a_params, uint32_t a_count)
 	{
+		static_assert(kMaxStamps <= 128, "NoNoiseMask holds one bit per stamp in a uint4");
+
+		for (auto& word : a_params.noNoiseMask) {
+			word = 0;
+		}
+
 		for (uint32_t i = 0; i < a_count; ++i) {
 			const float* s = a_params.stamps[i];
+			const float* p = a_params.stampParams[i];
 			const float* motion = a_params.stampMotion[i];
+
+			// The shader's branch tests: melt, print, and press for the rest (NaN too).
+			const bool melt = p[2] > 0.5f && p[2] < 1.5f;
+			if (melt || p[2] > 1.5f) {
+				a_params.noNoiseMask[i >> 5] |= 1u << (i & 31);
+			}
+			const bool rimless =
+				melt && p[0] >= 0.0f && p[0] < 1.0f && a_params.stampShape[i][2] == 0.0f;
 
 			const bool  snow = motion[2] > 0.5f;
 			const float span = snow ? a_params.snowRim[0] : a_params.control[3];
 			const float lean = snow ? a_params.snowRim[2] : a_params.rimShape[0];
 
 			const float reach = std::max(s[2], a_params.stampShape[i][2]) *
-				(1.0f + std::max(span, 0.0f) * (1.0f + std::clamp(lean, 0.0f, 1.0f)));
+				(rimless ? 1.0f :
+						   1.0f + std::max(span, 0.0f) * (1.0f + std::clamp(lean, 0.0f, 1.0f)));
 
 			a_params.stampBounds[i][0] = s[0] + (std::min(0.0f, -motion[0]) - reach);
 			a_params.stampBounds[i][1] = s[1] + (std::min(0.0f, -motion[1]) - reach);
@@ -111,6 +134,8 @@ cbuffer Params : register(b0)
 	float4 RaiseWindow;
 
 	float4 StampBounds[MAX_STAMPS];
+
+	uint4 NoNoiseMask;
 };
 
 )"
@@ -355,11 +380,12 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID,
 	}
 	GroupMemoryBarrierWithGroupSync();
 
-	// Only a group with a stamp in reach needs the noise. Inside the loop fxc
-	// hoisted it in front of every texel, so it is evaluated here behind a branch.
+	// Only a group with a press stamp in reach needs the noise (the melt and print
+	// branches never read it). Inside the loop fxc hoisted it in front of every
+	// texel, so it is evaluated here behind a branch.
 	uint anyHit = 0;
 	[unroll] for (uint w = 0; w < kStampWords; ++w) {
-		anyHit |= gStampHits[w];
+		anyHit |= gStampHits[w] & ~NoNoiseMask[w];
 	}
 	[branch] if (anyHit != 0) {
 		rimNoise = max(Weather.w, SnowRim.y) > 0.0f ? RimNoise(worldXY) : 0.0f;
@@ -401,6 +427,9 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID,
 
 		const float f = 1.0f - smoothstep(s.z * p.x, s.z, d);
 
+		// FillStampBounds stops a round melt with 0 <= shoulder < 1 at its radius,
+		// where f reaches 0. A melt rim, or a weight that reaches further, needs a
+		// wider rectangle there.
 		if (p.z > 0.5f && p.z < 1.5f) {
 			const float meltHere = s.w * f;
 			if (meltHere > melt) {

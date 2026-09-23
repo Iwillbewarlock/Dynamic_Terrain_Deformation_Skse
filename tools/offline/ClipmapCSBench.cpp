@@ -60,6 +60,7 @@ namespace
 		float raise[4]{};
 		float raiseWindow[4]{};
 		float stampBounds[kStamps][4]{};  // read only by the current shader
+		uint32_t noNoiseMask[4]{};        // read only by the current shader
 	};
 	static_assert(sizeof(Params) % 16 == 0);
 
@@ -546,6 +547,26 @@ namespace
 				}
 			}
 			Clipmap::FillStampBounds(p, static_cast<uint32_t>(count));
+			// Slide some stamps so that an edge of their rectangle sits on a cell of either
+			// level, often a group corner (cells 7 and 0 of eight), exactly or within a cell
+			// and a half: there a rectangle that is too tight drops texels.
+			if (count > 0 && Chance(0.3f)) {
+				for (int i = 0; i < count; ++i) {
+					const int   edge = static_cast<int>(_rng() % 4);
+					const float at = p.stampBounds[i][edge];
+					if (!Chance(0.5f) || !std::isfinite(at)) {
+						continue;
+					}
+					const float cell = Clipmap::CellSizeFor(Chance(0.5f) ? 0 : 1);
+					float       k = std::round(at / cell);
+					if (Chance(0.5f)) {
+						k = std::floor(k / 8.0f) * 8.0f + (Chance(0.5f) ? 0.0f : 7.0f);
+					}
+					const float nudge = Chance(0.4f) ? 0.0f : cell * Uniform(-1.5f, 1.5f);
+					p.stamps[i][edge & 1] += k * cell + nudge - at;
+				}
+				Clipmap::FillStampBounds(p, static_cast<uint32_t>(count));
+			}
 
 			for (uint32_t i = 0; i < kLevels; ++i) {
 				const uint32_t level = kLevels - 1 - i;
@@ -598,7 +619,7 @@ namespace
 		void RandomSettings()
 		{
 			const float pick = Uniform(0.0f, 1.0f);
-			_rimSpan = pick < 0.1f ? 0.0f : pick < 0.6f ? 1.0f : Uniform(0.0f, 3.0f);
+			_rimSpan = pick < 0.1f ? 0.0f : pick < 0.6f ? 1.0f : pick < 0.95f ? Uniform(0.0f, 3.0f) : 16.0f;
 			_fill = Chance(0.35f) ? Uniform(0.001f, 0.3f) : 0.0f;
 			_slope = _repose && Chance(0.8f) ? std::tan(Uniform(10.0f, 80.0f) * 0.017453292f) : 0.0f;
 			_reposeRate = Chance(0.5f) ? 0.01f : Uniform(0.0f, 1.0f);
@@ -648,6 +669,16 @@ namespace
 			a_p.stampShape[a_i][1] = straight ? 1.0f : std::cos(angle);
 			a_p.stampShape[a_i][2] = kind == 2.0f ? Uniform(2.0f, 40.0f) : (Chance(0.5f) ? 0.0f : Uniform(2.0f, 60.0f));
 			a_p.stampShape[a_i][3] = Chance(0.5f) ? 1.0f : -1.0f;
+
+			// Melts outside the rimless case: a shoulder of 1 or more (the weight no
+			// longer ends at the radius), or no forward with a half width (NaN distance).
+			if (kind == 1.0f && Chance(0.15f)) {
+				const float edge = Uniform(0.0f, 1.0f);
+				a_p.stampParams[a_i][0] = edge < 0.3f ? 0.0f : edge < 0.65f ? 1.0f : 1.5f;
+			}
+			if (kind == 1.0f && Chance(0.05f)) {
+				a_p.stampShape[a_i][0] = a_p.stampShape[a_i][1] = 0.0f;
+			}
 
 			const float motion = Uniform(0.0f, 1.0f);
 			const float reach = motion < 0.6f ? 0.0f : motion < 0.9f ? 30.0f : 200.0f;
@@ -834,8 +865,9 @@ namespace
 	}
 
 	// Timing layouts, the player standing still: small prints and presses within
-	// +/-400 u of the player, optionally with heat melts or six radius-256 melts, or
-	// moved out of both windows to show what the culling itself costs.
+	// +/-400 u of the player, optionally with heat melts (forty lantern sized, six or
+	// four at radius 256, or two torches), or moved out of both windows to show what
+	// the culling itself costs.
 	void TimingParams(int a_count, int a_mode, Params (&a_levels)[kLevels])
 	{
 		const float  px = 20000.3f;
@@ -887,6 +919,17 @@ namespace
 			if (a_mode == 2 && i < 6) {
 				r = 256.0f;
 			}
+			// 4: the first four are light melts at HeatMaxRadius; 5: the first two are
+			// carried torches (HeatTorchRadius 40).
+			if ((a_mode == 4 && i < 4) || (a_mode == 5 && i < 2)) {
+				r = a_mode == 4 ? 256.0f : 40.0f;
+				kind = 1.0f;
+				x = px + (a_mode == 4 ? wide(rng) : close(rng));
+				y = py + (a_mode == 4 ? wide(rng) : close(rng));
+				halfWidth = 0.0f;
+				rim = 0.0f;
+				depth = 0.85f;
+			}
 			if (a_mode == 3) {
 				x += 5000.0f;
 			}
@@ -933,6 +976,8 @@ namespace
 			{ 64, 1, "64 interior mix (40 melts r20-60)" },
 			{ 64, 2, "64 incl. six r=256 melts" },
 			{ 64, 3, "64 small, 5000 u away (all culled)" },
+			{ 20, 4, "16 small + 4 r=256 light melts" },
+			{ 12, 5, "10 small + 2 torch melts r=40" },
 		};
 		constexpr int kRounds = 10;
 		constexpr int kWarmup = 10;

@@ -44,6 +44,7 @@ struct Params
 	float raise[4]{ 0, 1, 0, 0 };
 	float raiseWindow[4]{ 0, 0, 1.0e6f, 2.0e6f };
 	float stampBounds[Clipmap::kMaxStamps][4]{};
+	uint32_t noNoiseMask[4]{};
 	Params()
 	{
 		stamps[0][2] = 5;
