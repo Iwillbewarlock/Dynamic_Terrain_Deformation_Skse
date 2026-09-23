@@ -322,6 +322,11 @@ namespace Shelter
 		return g_revision;
 	}
 
+	bool Settling()
+	{
+		return g_transition;
+	}
+
 	float CapAt(float a_worldX, float a_worldY)
 	{
 

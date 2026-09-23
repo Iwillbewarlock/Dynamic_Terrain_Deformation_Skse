@@ -1091,6 +1091,20 @@ namespace Hooks
 
 		}
 
+		// No land draw is routed in an interior, so nothing there samples the field, the
+		// snow coverage or the shelter map - except mesh raise, which reads them on statics
+		// in any cell, so it keeps the updates running. No parent cell (mid-load) counts as
+		// outside.
+		bool FieldIdleIndoors()
+		{
+			if (Settings::enableMeshRaise && Settings::meshRaiseHeight > 0.0f) {
+				return false;
+			}
+			auto* player = globals::game::player;
+			auto* cell = player ? player->GetParentCell() : nullptr;
+			return cell && cell->IsInteriorCell();
+		}
+
 		struct Main_RenderDepth
 		{
 			static void thunk(bool a1, bool a2)
@@ -1113,11 +1127,26 @@ namespace Hooks
 
 				Weather::Update();
 
-			Shelter::Update();
-			SnowCoverage::Update();
+				static bool wasIndoors = false;
+				const bool  indoors = FieldIdleIndoors();
+				if (indoors && !wasIndoors) {
+					Clipmap::ForgetWindow();
+					ObjectStamps::Forget();
+				}
+				wasIndoors = indoors;
 
-				if (Settings::useClipmap) {
-					Clipmap::Update(step);
+				// A shelter fade still running at the door finishes indoors, as it did
+				// before, so the maps match on the way back out.
+				if (!indoors || Shelter::Settling()) {
+					Shelter::Update();
+				}
+
+				if (!indoors) {
+					SnowCoverage::Update();
+
+					if (Settings::useClipmap) {
+						Clipmap::Update(step);
+					}
 				}
 
 				SnowSparkle::Update(step);
