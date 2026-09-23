@@ -506,7 +506,7 @@ namespace Clipmap
 			const float clearance =
 				Settings::stampGroundClearance * std::max(response.clearanceScale, 0.0f);
 
-			RE::BSVisit::TraverseScenegraphCollision(
+			ActorShapes::WalkCollision(
 				root, [&](RE::bhkNiCollisionObject* a_object) -> RE::BSVisit::BSVisitControl {
 					if (a_out.size() >= kMaxStamps) {
 						return RE::BSVisit::BSVisitControl::kStop;
