@@ -1033,7 +1033,9 @@ namespace Hooks
 			static void thunk(RE::BSShader* a_shader, RE::BSRenderPass* a_pass, uint32_t a_renderFlags)
 			{
 
-				Tessellation::EndDraw();
+				if (Tessellation::Active()) {
+					Tessellation::EndDraw();
+				}
 
 				func(a_shader, a_pass, a_renderFlags);
 			}
@@ -1157,7 +1159,9 @@ namespace Hooks
 		{
 			static void thunk(RE::BSShader* a_shader, RE::BSRenderPass* a_pass, uint32_t a_renderFlags)
 			{
-				Tessellation::EndDraw();
+				if (Tessellation::Active()) {
+					Tessellation::EndDraw();
+				}
 
 				func(a_shader, a_pass, a_renderFlags);
 			}

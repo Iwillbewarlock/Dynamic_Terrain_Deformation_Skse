@@ -1274,7 +1274,6 @@ namespace Tessellation
 		TerrainCulling::Bracket g_culling;
 		float g_biasValue{};
 		std::unordered_map<ID3D11VertexShader*, float> g_biasShaders;
-		bool       g_active{ false };
 
 		Mode g_activeMode{ Mode::kLandscape };
 
@@ -1326,10 +1325,7 @@ namespace Tessellation
 		};
 	}
 
-	bool Active()
-	{
-		return g_active;
-	}
+	bool g_active{ false };
 
 	bool BeginDraw(uint64_t a_vertexDesc, const Reflection::Signature& a_signature,
 		Mode a_mode, const DrawMaterial& a_material)

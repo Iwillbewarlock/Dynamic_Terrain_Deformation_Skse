@@ -55,7 +55,14 @@ namespace Tessellation
 
 	void EndDraw();
 
-	bool Active();
+	// True from a BeginDraw that routed a draw to its EndDraw. Read inline because the
+	// RestoreGeometry hooks test it after every draw the game makes.
+	extern bool g_active;
+
+	inline bool Active()
+	{
+		return g_active;
+	}
 
 	void VertexShaderBound(ID3D11DeviceContext*, ID3D11VertexShader*);
 	ID3D11RasterizerState* RasterizerFor(ID3D11DeviceContext*, ID3D11RasterizerState*);
