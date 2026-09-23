@@ -45,6 +45,18 @@ namespace Tessellation
 			return out;
 		}
 
+		// Hull-shader savings. Each piece is emitted only while its INI switch is on, so with
+		// every switch off the generated source is byte-identical to the legacy generator.
+		bool FactorSnapEmitted()
+		{
+			return Settings::tessellationFactorSnap > 0.0f;
+		}
+
+		bool EdgeWrapperEmitted()
+		{
+			return Settings::tessellationCanonicalEdges || FactorSnapEmitted();
+		}
+
 		std::string EmitPrologue(bool a_displace, Mode a_mode)
 		{
 			std::string out =
@@ -450,17 +462,61 @@ namespace Tessellation
 				;
 			}
 
+			if (FactorSnapEmitted()) {
+				out += std::format("static const float kFactorSnap = {:.6f}f;\n\n",
+					Settings::tessellationFactorSnap);
+			}
+
+			if (EdgeWrapperEmitted()) {
+				out +=
+					"float EdgeTess(float3 a, float3 b)\n"
+					"{\n";
+
+				if (Settings::tessellationCanonicalEdges) {
+					out +=
+						"\t// The two patches on an edge see it in opposite order. Sorting first makes\n"
+						"\t// every per-edge term (EdgeBound's lerp samples included) bit-identical.\n"
+						"\tconst bool swap = a.x > b.x ||\n"
+						"\t\t(a.x == b.x && (a.y > b.y || (a.y == b.y && a.z > b.z)));\n"
+						"\tconst float3 lo = swap ? b : a;\n"
+						"\tconst float3 hi = swap ? a : b;\n\n";
+				} else {
+					out +=
+						"\tconst float3 lo = a;\n"
+						"\tconst float3 hi = b;\n\n";
+				}
+
+				out += "\tfloat factor = EdgeFactor(lo, hi);\n";
+
+				if (FactorSnapEmitted()) {
+					out +=
+						"\t// Integer partitioning rounds up; flat 128-unit edges land exactly on 16.0\n"
+						"\t// or 2.0 and jittered reconstruction noise would flip them to 17 or 3.\n"
+						"\tfactor = max(factor - kFactorSnap, 1.0f);\n";
+				}
+
+				out +=
+					"\treturn factor;\n"
+					"}\n\n";
+			}
+
 			out +=
 				"PatchConstants PatchConstantFn(InputPatch<CP, 3> patch)\n"
 				"{\n"
 				"\tPatchConstants o;\n"
 				"\tconst float3 p0 = ReconstructWorld(patch[0].f0);\n"
 				"\tconst float3 p1 = ReconstructWorld(patch[1].f0);\n"
-				"\tconst float3 p2 = ReconstructWorld(patch[2].f0);\n\n"
+				"\tconst float3 p2 = ReconstructWorld(patch[2].f0);\n\n";
 
+			out += EdgeWrapperEmitted() ?
+				"\to.edges[0] = EdgeTess(p1, p2);\n"
+				"\to.edges[1] = EdgeTess(p2, p0);\n"
+				"\to.edges[2] = EdgeTess(p0, p1);\n" :
 				"\to.edges[0] = EdgeFactor(p1, p2);\n"
 				"\to.edges[1] = EdgeFactor(p2, p0);\n"
-				"\to.edges[2] = EdgeFactor(p0, p1);\n"
+				"\to.edges[2] = EdgeFactor(p0, p1);\n";
+
+			out +=
 				"\to.inside   = max(o.edges[0], max(o.edges[1], o.edges[2]));\n"
 				"\treturn o;\n"
 				"}\n\n";

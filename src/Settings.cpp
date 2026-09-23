@@ -262,6 +262,11 @@ namespace Settings
 		} else if (key == "TessellationBlanketSpacing") {
 			tessellationBlanketSpacing =
 				Clamped(key, AsFloat(key, value, 8.0f), 0.0f, 4096.0f);
+		} else if (key == "TessellationFactorSnap") {
+			tessellationFactorSnap =
+				Clamped(key, AsFloat(key, value, 0.015625f), 0.0f, 0.25f);
+		} else if (key == "TessellationCanonicalEdges") {
+			tessellationCanonicalEdges = AsBool(value);
 		} else if (key == "DebugWorldZOffset") {
 			debugWorldZOffset = AsFloat(key, value, 0.0f);
 		} else if (key == "DebugWaveAmplitude") {
@@ -817,6 +822,9 @@ namespace Settings
 		logger::info("Tessellation budget: bounds={} | blanket spacing={} | distant spacing={} | mark spacing={} | maxfactor={}; blanket floor v1",
 			enableTessellationBounds, tessellationBlanketSpacing, tessellationRaiseSpacing,
 			tessellationTargetSpacing, tessellationMaxFactor);
+
+		logger::info("Hull savings: factor snap={} | canonical edges={}", tessellationFactorSnap,
+			tessellationCanonicalEdges);
 
 		logger::info("Snow raise: enabled={} | height={} | weather={} | distance={} "
 					 "fade={} | coverage budget={}/frame",

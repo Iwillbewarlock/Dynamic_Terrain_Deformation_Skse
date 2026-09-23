@@ -136,6 +136,13 @@ namespace Settings
 
 	inline float tessellationBlanketSpacing{ 8.0f };
 
+	// Hull-shader savings (generated patch-constant code). Code defaults match the shipped INI,
+	// so an INI without these keys still gets them. With every switch at 0 the generator emits
+	// the legacy shaders byte for byte.
+	inline float tessellationFactorSnap{ 0.015625f };
+
+	inline bool tessellationCanonicalEdges{ true };
+
 	inline bool cullDistantDraws{ true };
 
 	inline float cullMargin{ 256.0f };
