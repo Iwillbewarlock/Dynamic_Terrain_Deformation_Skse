@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Copyright (c) 2026 NearMidnightNow (NMN).
+// Copyright (c) 2026 NearMidnightNow (NMN) and contributors.
 
 // Runs the clipmap update shader from before per-group stamp culling and the current
 // one side by side on the GPU. Both get the same resources and the same seeded frames
@@ -101,7 +101,7 @@ namespace
 		return Clipmap::UpdateShaderSource();
 	}
 
-	// The same generated constants in front of the perf-base shader body.
+	// The same generated constants in front of the ec04e21 shader body.
 	std::string BaselineSource()
 	{
 		const std::string current = Clipmap::UpdateShaderSource();
@@ -958,7 +958,7 @@ namespace
 		}
 
 		std::printf("\nGPU time per frame, both levels (median of %d rounds x %d frames; p10-p90)\n", kRounds, kFrames);
-		std::printf("  %-36s %22s %22s %8s\n", "case", "perf-base", "culled", "speedup");
+		std::printf("  %-36s %22s %22s %8s\n", "case", "ec04e21", "culled", "speedup");
 		for (size_t c = 0; c < std::size(cases); ++c) {
 			double median[2];
 			double p10[2];
@@ -1002,13 +1002,13 @@ int main(int a_argc, char** a_argv)
 	}
 
 	try {
-		const auto baseline = Compile(BaselineSource(), "perf-base shader");
+		const auto baseline = Compile(BaselineSource(), "ec04e21 shader");
 		const auto current = Compile(CurrentSource(), "current shader");
-		const auto baselineExact = Compile(WithoutNeighbourRace(BaselineSource()), "perf-base shader (race-free)");
+		const auto baselineExact = Compile(WithoutNeighbourRace(BaselineSource()), "ec04e21 shader (race-free)");
 		const auto currentExact = Compile(WithoutNeighbourRace(CurrentSource()), "current shader (race-free)");
-		std::puts("PASS compiled perf-base and current update shaders (cs_5_0, O3, MAX_STAMPS=64)");
+		std::puts("PASS compiled ec04e21 and current update shaders (cs_5_0, O3, MAX_STAMPS=64)");
 		if (!asmDir.empty()) {
-			WriteDisassembly(baseline.Get(), asmDir + "/clipmap_update_perf_base.asm");
+			WriteDisassembly(baseline.Get(), asmDir + "/clipmap_update_ec04e21.asm");
 			WriteDisassembly(current.Get(), asmDir + "/clipmap_update_current.asm");
 		}
 
@@ -1028,12 +1028,12 @@ int main(int a_argc, char** a_argv)
 			false, false, true);
 
 		// With repose on, the shipping shader reads neighbours that other threads may
-		// already have written. Show how far perf-base differs from itself run to run.
+		// already have written. Show how far the ec04e21 shader differs from itself run to run.
 		Side oldAgain;
 		gpu.CreateSide(oldAgain, baseline.Get());
-		RunFrames(gpu, oldShipping, oldAgain, "perf-base against itself, shipping, repose on", std::min(frames, 60),
+		RunFrames(gpu, oldShipping, oldAgain, "ec04e21 against itself, shipping, repose on", std::min(frames, 60),
 			seed + 2, true, false, false);
-		RunFrames(gpu, oldShipping, culledShipping, "perf-base against current, shipping, repose on",
+		RunFrames(gpu, oldShipping, culledShipping, "ec04e21 against current, shipping, repose on",
 			std::min(frames, 60), seed + 2, true, false, false);
 
 		if (!timing) {

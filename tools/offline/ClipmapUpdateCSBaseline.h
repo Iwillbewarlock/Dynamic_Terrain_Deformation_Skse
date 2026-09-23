@@ -2,7 +2,7 @@
 // Copyright (c) 2026 NearMidnightNow (NMN).
 
 // The clipmap update shader as it was before per-group stamp culling, copied
-// verbatim from src/ClipmapUpdateCS.h (perf-base). ClipmapCSBench runs it beside
+// verbatim from src/ClipmapUpdateCS.h at ec04e21. ClipmapCSBench runs it beside
 // the current shader and requires bit-identical results.
 
 #pragma once

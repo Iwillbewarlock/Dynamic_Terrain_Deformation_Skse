@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Copyright (c) 2026 NearMidnightNow (NMN).
+// Copyright (c) 2026 NearMidnightNow (NMN) and contributors.
 
 // Runs the generated landscape hull and domain shaders on WARP and compares the hull
 // savings (frustum cull, screen cap, factor snap, canonical edges) with the legacy

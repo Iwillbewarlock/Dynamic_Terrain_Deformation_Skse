@@ -76,12 +76,20 @@ if(BUILD_OFFLINE_TOOLS)
     target_compile_features(StampSurfaceTest PRIVATE cxx_std_23)
     target_link_libraries(StampSurfaceTest PRIVATE d3d11.lib d3dcompiler.lib bcrypt.lib)
 
+endif()
+
+# One-off GPU checks for the performance series: ClipmapCSBench compares the update shader
+# with a frozen copy of the ec04e21 one (so it is expected to fail after any deliberate change
+# to that shader), HullFactorCheck runs the generated hull and domain shaders on WARP (minutes).
+# Neither is run by build.cmd.
+option(BUILD_GPU_CHECKS "Build ClipmapCSBench and HullFactorCheck" OFF)
+
+if(BUILD_GPU_CHECKS)
     add_executable(ClipmapCSBench tools/offline/ClipmapCSBench.cpp)
     target_include_directories(ClipmapCSBench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_compile_features(ClipmapCSBench PRIVATE cxx_std_23)
     target_link_libraries(ClipmapCSBench PRIVATE d3d11.lib d3dcompiler.lib)
 
-    # Runs the generated hull and domain shaders on WARP (minutes). Not part of build.cmd.
     add_executable(HullFactorCheck tools/offline/HullFactorCheck.cpp)
 
     target_include_directories(HullFactorCheck PRIVATE
