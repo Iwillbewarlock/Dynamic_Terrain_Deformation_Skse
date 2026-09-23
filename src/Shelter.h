@@ -39,7 +39,11 @@ namespace Shelter
 
 	uint32_t Revision();
 
-	float AtCell(int32_t a_cellX, int32_t a_cellY);
+	// Sets a_upload[i] = a_smooth[i] * (1 - roof) for every texel of a toroidal window of
+	// a_texels (a power of two) cells from a_baseX/Y that has a roof. Texels without one are
+	// left as they are, so the caller copies a_smooth into a_upload first.
+	void ApplyOpen(const uint8_t* a_smooth, uint8_t* a_upload, uint32_t a_texels,
+		int32_t a_baseX, int32_t a_baseY);
 
 	float CapAt(float a_worldX, float a_worldY);
 }

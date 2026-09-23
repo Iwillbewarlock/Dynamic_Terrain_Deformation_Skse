@@ -4,6 +4,7 @@
 #include "PCH.h"
 #include <chrono>
 
+#include "BoxFilter.h"
 #include "Globals.h"
 #include "Profiler.h"
 #include "Settings.h"
@@ -217,39 +218,7 @@ namespace SnowCoverage
 				return;
 			}
 
-			const int      width = 2 * r + 1;
-			const uint32_t area = static_cast<uint32_t>(width) * static_cast<uint32_t>(width);
-
-			for (int y = 0; y < n; ++y) {
-				const uint8_t* src = &g_coverage[static_cast<size_t>(y) * n];
-				uint32_t*      dst = &g_rowSums[static_cast<size_t>(y) * n];
-
-				uint32_t sum = 0;
-				for (int k = -r; k <= r; ++k) {
-					sum += src[static_cast<uint32_t>(k) & kMask];
-				}
-				for (int x = 0; x < n; ++x) {
-					dst[x] = sum;
-					sum -= src[static_cast<uint32_t>(x - r) & kMask];
-					sum += src[static_cast<uint32_t>(x + r + 1) & kMask];
-				}
-			}
-
-			for (int x = 0; x < n; ++x) {
-				uint32_t sum = 0;
-				for (int k = -r; k <= r; ++k) {
-					sum += g_rowSums[(static_cast<size_t>(static_cast<uint32_t>(k) & kMask) * n) +
-						static_cast<size_t>(x)];
-				}
-				for (int y = 0; y < n; ++y) {
-					g_smooth[(static_cast<size_t>(y) * n) + static_cast<size_t>(x)] =
-						static_cast<uint8_t>(sum / area);
-					sum -= g_rowSums[(static_cast<size_t>(static_cast<uint32_t>(y - r) & kMask) * n) +
-						static_cast<size_t>(x)];
-					sum += g_rowSums[(static_cast<size_t>(static_cast<uint32_t>(y + r + 1) & kMask) * n) +
-						static_cast<size_t>(x)];
-				}
-			}
+			BoxFilter::Apply<kTexels>(g_coverage.data(), g_smooth.data(), g_rowSums.data(), r);
 		}
 	}
 
@@ -258,20 +227,10 @@ namespace SnowCoverage
 
 		void Combine(int32_t a_baseX, int32_t a_baseY)
 		{
-			const uint32_t total = static_cast<uint32_t>(g_smooth.size());
-			for (uint32_t index = 0; index < total; ++index) {
-				const uint32_t tx = index & kMask;
-				const uint32_t ty = index / kTexels;
-
-				const int32_t cellX = a_baseX +
-					static_cast<int32_t>((tx - static_cast<uint32_t>(a_baseX)) & kMask);
-				const int32_t cellY = a_baseY +
-					static_cast<int32_t>((ty - static_cast<uint32_t>(a_baseY)) & kMask);
-
-				const float open = 1.0f - Shelter::AtCell(cellX, cellY);
-				g_upload[index] =
-					static_cast<uint8_t>(static_cast<float>(g_smooth[index]) * open);
-			}
+			// Where no roof covers a texel it is uploaded as smoothed, so only the texels under
+			// the shelter window need scaling.
+			std::copy(g_smooth.begin(), g_smooth.end(), g_upload.begin());
+			Shelter::ApplyOpen(g_smooth.data(), g_upload.data(), kTexels, a_baseX, a_baseY);
 		}
 	}
 

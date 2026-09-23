@@ -439,22 +439,40 @@ namespace Shelter
 		return std::clamp(cap, 0.0f, 1.0f);
 	}
 
-	float AtCell(int32_t a_cellX, int32_t a_cellY)
+	void ApplyOpen(const uint8_t* a_smooth, uint8_t* a_upload, uint32_t a_texels,
+		int32_t a_baseX, int32_t a_baseY)
 	{
 		if (!Settings::enableShelter || !g_allocated || !g_haveCentre) {
-			return 0.0f;
+			return;
 		}
 
-		const int32_t half = static_cast<int32_t>(kTexels / 2);
-		if (std::abs(a_cellX - g_centreCellX) >= half ||
-			std::abs(a_cellY - g_centreCellY) >= half) {
-			return 0.0f;
-		}
+		// Only cells less than half the grid from the centre have a roof value; further out
+		// the grid wraps onto them. Clip that square to the caller's window.
+		const int32_t reach = static_cast<int32_t>(kTexels / 2) - 1;
+		const int32_t last = static_cast<int32_t>(a_texels) - 1;
+		const int32_t fromX = std::max(g_centreCellX - reach, a_baseX);
+		const int32_t toX = std::min(g_centreCellX + reach, a_baseX + last);
+		const int32_t fromY = std::max(g_centreCellY - reach, a_baseY);
+		const int32_t toY = std::min(g_centreCellY + reach, a_baseY + last);
 
-		const uint32_t tx = static_cast<uint32_t>(a_cellX) & kMask;
-		const uint32_t ty = static_cast<uint32_t>(a_cellY) & kMask;
-		return static_cast<float>(g_smooth[(static_cast<size_t>(ty) * kTexels) + tx]) *
-			(1.0f / 255.0f);
+		const uint32_t mask = a_texels - 1;
+		for (int32_t cellY = fromY; cellY <= toY; ++cellY) {
+			const uint8_t* roofs =
+				&g_smooth[static_cast<size_t>(static_cast<uint32_t>(cellY) & kMask) * kTexels];
+			const size_t row = static_cast<size_t>(static_cast<uint32_t>(cellY) & mask) * a_texels;
+
+			for (int32_t cellX = fromX; cellX <= toX; ++cellX) {
+				const uint8_t roof = roofs[static_cast<uint32_t>(cellX) & kMask];
+				const size_t  index = row + (static_cast<uint32_t>(cellX) & mask);
+				// With no roof or no snow the copied value is already the result.
+				if (roof == 0 || a_smooth[index] == 0) {
+					continue;
+				}
+
+				const float open = 1.0f - static_cast<float>(roof) * (1.0f / 255.0f);
+				a_upload[index] = static_cast<uint8_t>(static_cast<float>(a_smooth[index]) * open);
+			}
+		}
 	}
 
 	void Update()
