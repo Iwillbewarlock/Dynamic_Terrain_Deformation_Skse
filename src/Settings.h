@@ -139,6 +139,10 @@ namespace Settings
 	// Hull-shader savings (generated patch-constant code). Code defaults match the shipped INI,
 	// so an INI without these keys still gets them. With every switch at 0 the generator emits
 	// the legacy shaders byte for byte.
+	inline bool tessellationFrustumCull{ true };
+
+	inline float tessellationDisplaceBound{ 256.0f };
+
 	inline float tessellationFactorSnap{ 0.015625f };
 
 	inline bool tessellationCanonicalEdges{ true };

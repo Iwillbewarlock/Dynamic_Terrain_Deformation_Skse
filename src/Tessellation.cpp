@@ -47,6 +47,11 @@ namespace Tessellation
 
 		// Hull-shader savings. Each piece is emitted only while its INI switch is on, so with
 		// every switch off the generated source is byte-identical to the legacy generator.
+		bool FrustumCullEmitted()
+		{
+			return Settings::tessellationFrustumCull;
+		}
+
 		bool FactorSnapEmitted()
 		{
 			return Settings::tessellationFactorSnap > 0.0f;
@@ -55,6 +60,17 @@ namespace Tessellation
 		bool EdgeWrapperEmitted()
 		{
 			return Settings::tessellationCanonicalEdges || FactorSnapEmitted();
+		}
+
+		// Bound on |rise| that the hull cull assumes and the domain shader enforces: the
+		// field (INI bound), the constant and debug lifts, and the snow raise
+		// (Weather::RaiseScale is at most 1).
+		float DisplaceBound()
+		{
+			const bool raising = Settings::enableSnowRaise && Settings::useClipmap &&
+				Settings::snowRaiseHeight > 0.0f;
+			return Settings::tessellationDisplaceBound + std::abs(Settings::debugWorldZOffset) +
+				std::abs(Settings::debugWaveAmplitude) + (raising ? Settings::snowRaiseHeight : 0.0f);
 		}
 
 		std::string EmitPrologue(bool a_displace, Mode a_mode)
@@ -381,6 +397,31 @@ namespace Tessellation
 				return out;
 			}
 
+			if (FrustumCullEmitted()) {
+				out += std::format("static const float kDisplaceBound = {:.4f}f;\n\n", DisplaceBound());
+
+				out +=
+					"float4 FrustumSides(float4 c)\n"
+					"{\n"
+					"\treturn c.wwww + float4(c.x, -c.x, c.y, -c.y);\n"
+					"}\n\n"
+					"bool PatchOffScreen(float4 c0, float4 c1, float4 c2)\n"
+					"{\n"
+					"\t// The domain shader draws the flat patch plus placed * up with |placed| <=\n"
+					"\t// kDisplaceBound, so every drawn point lies in the hull of ci +- kDisplaceBound * up.\n"
+					"\t// All six points outside one side plane, or behind the eye, means no pixel.\n"
+					"\tconst float4 up = mul(CameraViewProj, float4(0.0f, 0.0f, 1.0f, 0.0f));\n"
+					"\tconst float4 sides =\n"
+					"\t\tmax(FrustumSides(c0), max(FrustumSides(c1), FrustumSides(c2))) +\n"
+					"\t\tkDisplaceBound * abs(FrustumSides(up));\n"
+					"\tconst float  front = max(c0.w, max(c1.w, c2.w)) + kDisplaceBound * abs(up.w);\n\n"
+					"\tconst float4 m = max(abs(c0), max(abs(c1), abs(c2)));\n"
+					"\tconst float  guard = 1.0e-4f * (max(m.x, max(m.y, m.w)) +\n"
+					"\t\tkDisplaceBound * max(abs(up.x), max(abs(up.y), abs(up.w))) + 1.0f);\n"
+					"\treturn any(sides < -guard) || front < -guard;\n"
+					"}\n\n";
+			}
+
 			const bool bounded = Settings::useClipmap && Settings::enableTessellationBounds;
 
 			if (bounded) {
@@ -503,7 +544,20 @@ namespace Tessellation
 			out +=
 				"PatchConstants PatchConstantFn(InputPatch<CP, 3> patch)\n"
 				"{\n"
-				"\tPatchConstants o;\n"
+				"\tPatchConstants o;\n";
+
+			if (FrustumCullEmitted()) {
+				out +=
+					"\tif (PatchOffScreen(patch[0].f0, patch[1].f0, patch[2].f0)) {\n"
+					"\t\to.edges[0] = 0.0f;\n"
+					"\t\to.edges[1] = 0.0f;\n"
+					"\t\to.edges[2] = 0.0f;\n"
+					"\t\to.inside   = 0.0f;\n"
+					"\t\treturn o;\n"
+					"\t}\n\n";
+			}
+
+			out +=
 				"\tconst float3 p0 = ReconstructWorld(patch[0].f0);\n"
 				"\tconst float3 p1 = ReconstructWorld(patch[1].f0);\n"
 				"\tconst float3 p2 = ReconstructWorld(patch[2].f0);\n\n";
@@ -822,20 +876,27 @@ namespace Tessellation
 
 			if (displace) {
 
+				// The hull cull is only conservative while |rise| <= kDisplaceBound, so the placed
+				// height is clamped to it. The normals keep the unclamped rise.
+				const bool clampRise = FrustumCullEmitted() && WantsSubdivision(a_mode);
+				const char* const placed = clampRise ? "placed" : "rise";
+
 				out += std::format(
 					"\n\tconst float3 basePos = ReconstructWorld(o.f{0});\n"
 					"\tconst float  shift   = Displacement(basePos);\n"
-					"\tconst float  rise    = shift + SnowRaise(basePos);\n\n"
-
-					"\to.f{0} += mul(CameraViewProj, float4(0.0f, 0.0f, rise, 0.0f));\n",
-					clipIdx);
+					"\tconst float  rise    = shift + SnowRaise(basePos);\n"
+					"{1}\n"
+					"\to.f{0} += mul(CameraViewProj, float4(0.0f, 0.0f, {2}, 0.0f));\n",
+					clipIdx,
+					clampRise ? "\tconst float  placed  = clamp(rise, -kDisplaceBound, kDisplaceBound);\n" : "",
+					placed);
 
 				if (worldIdx >= 0) {
-					out += std::format("\to.f{0}.z += rise;\n", worldIdx);
+					out += std::format("\to.f{0}.z += {1};\n", worldIdx, placed);
 				}
 
 				if (prevWorldIdx >= 0) {
-					out += std::format("\to.f{0}.z += rise;\n", prevWorldIdx);
+					out += std::format("\to.f{0}.z += {1};\n", prevWorldIdx, placed);
 				}
 
 				if (a_mode == Mode::kLandscape) {

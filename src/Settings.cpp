@@ -262,6 +262,11 @@ namespace Settings
 		} else if (key == "TessellationBlanketSpacing") {
 			tessellationBlanketSpacing =
 				Clamped(key, AsFloat(key, value, 8.0f), 0.0f, 4096.0f);
+		} else if (key == "TessellationFrustumCull") {
+			tessellationFrustumCull = AsBool(value);
+		} else if (key == "TessellationDisplaceBound") {
+			tessellationDisplaceBound =
+				Clamped(key, AsFloat(key, value, 256.0f), 128.0f, 8192.0f);
 		} else if (key == "TessellationFactorSnap") {
 			tessellationFactorSnap =
 				Clamped(key, AsFloat(key, value, 0.015625f), 0.0f, 0.25f);
@@ -823,7 +828,9 @@ namespace Settings
 			enableTessellationBounds, tessellationBlanketSpacing, tessellationRaiseSpacing,
 			tessellationTargetSpacing, tessellationMaxFactor);
 
-		logger::info("Hull savings: factor snap={} | canonical edges={}", tessellationFactorSnap,
+		logger::info("Hull savings: frustum cull={} (displace bound {}) | factor snap={} | "
+					 "canonical edges={}; hull cull v1",
+			tessellationFrustumCull, tessellationDisplaceBound, tessellationFactorSnap,
 			tessellationCanonicalEdges);
 
 		logger::info("Snow raise: enabled={} | height={} | weather={} | distance={} "
