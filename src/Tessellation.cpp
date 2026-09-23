@@ -68,6 +68,17 @@ namespace Tessellation
 			return Settings::tessellationCanonicalEdges || ScreenCapEmitted() || FactorSnapEmitted();
 		}
 
+		// Near land vertex spacing: a 4096-unit cell in 32 quads.
+		constexpr float kLandGrid = 128.0f;
+
+		// Near land only: its corners sit on the 128-unit grid, which the rule snaps them to.
+		// A constant or debug lift makes no patch flat.
+		bool FlatRuleEmitted(Mode a_mode)
+		{
+			return Settings::tessellationSkipFlat && Settings::useClipmap && a_mode == Mode::kLandscape &&
+			       Settings::debugWorldZOffset == 0.0f && Settings::debugWaveAmplitude == 0.0f;
+		}
+
 		// Bound on |rise| that the hull cull and the screen cap assume, and that the domain
 		// shader enforces while the cull is on: the field (INI bound), the constant and debug
 		// lifts, and the snow raise (Weather::RaiseScale is at most 1).
@@ -387,7 +398,164 @@ namespace Tessellation
 			return out;
 		}
 
-		std::string EmitPatchConstants(bool a_tessellate)
+		// The flat-patch rule (TessellationSkipFlat). SurfaceOffset is exactly one value over a
+		// box when every field level that contributes there is quiet and the snow lift is
+		// exactly 0 or the full lift: then the domain shader draws the same plane at any factor.
+		std::string EmitFlatRule(bool a_bounded)
+		{
+			const bool coarse = Clipmap::LevelCount() > 1;
+			const bool raising = Settings::enableSnowRaise && Settings::snowRaiseHeight > 0.0f;
+
+			std::string out;
+			if (!a_bounded) {
+				out += std::format("Texture2D<uint> FieldActivity : register(t{});\n", Clipmap::kActivitySlot);
+			}
+			if (coarse) {
+				out += std::format("Texture2D<uint> FieldActivity1 : register(t{});\n", Clipmap::kActivity1Slot);
+			}
+			out += std::format(
+				"Texture2D<uint> LiftClass : register(t{0});\n\n"
+				"static const float kFlatCell   = {1:.4f}f;\n"
+				"static const int   kFlatMask   = {2};\n"
+				"static const float kFlatReach  = {3:.4f}f;  // two texels: a field sample's footprint\n"
+				"static const float kFlatCell1  = {4:.4f}f;\n"
+				"static const int   kFlatMask1  = {5};\n"
+				"static const float kFlatReach1 = {6:.4f}f;\n"
+				"static const float kLiftTexel  = {7:.4f}f;\n"
+				"static const int   kLiftMask   = {8};\n"
+				"static const uint  kLiftBound  = {9}u;\n"
+				"static const uint  kLiftNone   = {10}u;\n"
+				"static const uint  kLiftFull   = {11}u;\n"
+				"static const float kLandGrid   = {12:.1f}f;\n"
+				"static const float kFlatGuard  = 8.0f;  // far above reconstruction noise\n\n"
+
+				"// The domain shader's window and raise weights. They only fall as reach grows, so\n"
+				"// their values at a box's nearest and farthest reach bound every point in it.\n"
+				"float FlatWeight(float reach, float inner, float outer)\n"
+				"{{\n"
+				"\treturn 1.0f - saturate((reach - inner) / max(outer - inner, 1e-3f));\n"
+				"}}\n\n"
+				"float NearReach(float2 centre, float2 lo, float2 hi)\n"
+				"{{\n"
+				"\tconst float2 d = max(max(lo - centre, centre - hi), 0.0f);\n"
+				"\treturn max(d.x, d.y);\n"
+				"}}\n\n"
+				"float FarReach(float2 centre, float2 lo, float2 hi)\n"
+				"{{\n"
+				"\tconst float2 d = max(abs(lo - centre), abs(hi - centre));\n"
+				"\treturn max(d.x, d.y);\n"
+				"}}\n\n"
+
+				"// Activity holds the max |h| of a cell and the eight around it (the update shader\n"
+				"// dilates), so probes three cells apart from c0 + 1 read 0 only if c0 .. c1 are quiet.\n"
+				"bool Quiet(Texture2D<uint> activity, float cell, int mask, float2 lo, float2 hi)\n"
+				"{{\n"
+				"\tconst int2 c0 = int2(floor(lo / cell));\n"
+				"\tconst int2 c1 = int2(floor(hi / cell));\n"
+				"\tif (any(c1 - c0 > 8)) {{\n"
+				"\t\treturn false;\n"
+				"\t}}\n"
+				"\tconst int2 n = (c1 - c0) / 3 + 1;\n"
+				"\tconst int2 last = max(c1 - 1, c0 + 1);\n"
+				"\tuint m = 0u;\n"
+				"\t[loop] for (int j = 0; j < n.y; ++j) {{\n"
+				"\t\tconst int y = min(c0.y + 1 + 3 * j, last.y);\n"
+				"\t\t[loop] for (int i = 0; i < n.x; ++i) {{\n"
+				"\t\t\tm |= activity.Load(int3(int2(min(c0.x + 1 + 3 * i, last.x), y) & mask, 0));\n"
+				"\t\t}}\n"
+				"\t}}\n"
+				"\treturn m == 0u;\n"
+				"}}\n\n"
+
+				"// SnowRaise at x filters texels c, c + 1 with c = floor(x / kLiftTexel - 0.5); class\n"
+				"// texel b covers c = 2b .. 2b + 3, so two per axis cover up to six.\n"
+				"uint LiftOver(float2 lo, float2 hi)\n"
+				"{{\n"
+				"\tconst int2 b0 = int2(floor(lo / kLiftTexel - 0.5f)) >> 1;\n"
+				"\tconst int2 b1 = max((int2(floor(hi / kLiftTexel - 0.5f)) >> 1) - 1, b0);\n"
+				"\tif (any(b1 - b0 > 2)) {{\n"
+				"\t\treturn 0u;\n"
+				"\t}}\n"
+				"\treturn LiftClass.Load(int3(b0 & kLiftMask, 0)) &\n"
+				"\t\tLiftClass.Load(int3(int2(b1.x, b0.y) & kLiftMask, 0)) &\n"
+				"\t\tLiftClass.Load(int3(int2(b0.x, b1.y) & kLiftMask, 0)) &\n"
+				"\t\tLiftClass.Load(int3(b1 & kLiftMask, 0));\n"
+				"}}\n\n"
+
+				"bool FlatBox(float2 lo, float2 hi)\n"
+				"{{\n"
+				"\thi += kGradEps;  // the normal taps\n\n",
+				Clipmap::kLiftClassSlot,
+				Clipmap::CellSizeFor(0) * static_cast<float>(Clipmap::kActivityRatio),
+				Clipmap::kActivityTexels - 1, 2.0f * Clipmap::CellSizeFor(0),
+				Clipmap::CellSizeFor(1) * static_cast<float>(Clipmap::kActivityRatio1),
+				Clipmap::kActivityTexels1 - 1, 2.0f * Clipmap::CellSizeFor(1), SnowCoverage::kTexelSize,
+				Clipmap::kLiftClassTexels - 1, Clipmap::kLiftBound, Clipmap::kLiftNone, Clipmap::kLiftFull,
+				kLandGrid);
+
+			// Nested branches: HLSL's && does not skip the loads on its right.
+			const auto quiet0 = [](const char* a_tab) {
+				return std::format(
+					"{0}[branch] if (FlatWeight(NearReach(Window.xy, lo, hi), Window.z, Window.w) > 0.0f) {{\n"
+					"{0}\tif (!Quiet(FieldActivity, kFlatCell, kFlatMask, lo - kFlatReach, hi + kFlatReach)) {{\n"
+					"{0}\t\treturn false;\n"
+					"{0}\t}}\n"
+					"{0}}}\n",
+					a_tab);
+			};
+
+			if (coarse) {
+				out += std::format(
+					"\t[branch] if (FlatWeight(NearReach(Window1.xy, lo, hi), Window1.z, Window1.w) > 0.0f) {{\n"
+					"{}"
+					"\t\t// Where inWindow is exactly 1, lerp(coarse, 0, 1) is exactly 0.\n"
+					"\t\t[branch] if (FlatWeight(FarReach(Window.xy, lo, hi), Window.z, Window.w) < 1.0f) {{\n"
+					"\t\t\tif (!Quiet(FieldActivity1, kFlatCell1, kFlatMask1, lo - kFlatReach1, hi + kFlatReach1)) {{\n"
+					"\t\t\t\treturn false;\n"
+					"\t\t\t}}\n"
+					"\t\t}}\n"
+					"\t}}\n\n",
+					quiet0("\t\t"));
+			} else {
+				out += quiet0("\t") + "\n";
+			}
+
+			if (raising) {
+				out +=
+					"\t[branch] if (Raise.x == 0.0f ||\n"
+					"\t\tFlatWeight(NearReach(Window.xy, lo, hi), kRaiseFadeStart, kRaiseFadeEnd) <= 0.0f) {\n"
+					"\t\treturn true;\n"
+					"\t}\n"
+					"\tconst uint lift = LiftOver(lo - 1.0f, hi + 1.0f);\n"
+					"\treturn (lift & kLiftNone) != 0u || ((lift & kLiftFull) != 0u &&\n"
+					"\t\tFlatWeight(FarReach(Window.xy, lo, hi), kRaiseFadeStart, kRaiseFadeEnd) >= 1.0f);\n"
+					"}\n\n";
+			} else {
+				out += "\treturn true;\n}\n\n";
+			}
+
+			out +=
+				"// Near land lies on the 128-unit grid of its cell. Judging from the snapped corners\n"
+				"// gives both draws of a shared edge, and the depth and colour passes, one answer.\n"
+				"bool LandCorner(float3 p, out float2 q)\n"
+				"{\n"
+				"\tconst float2 world = p.xy + CameraPosAdjust.xy;\n"
+				"\tq = round(world / kLandGrid) * kLandGrid;\n"
+				"\treturn all(abs(world - q) <= kFlatGuard);\n"
+				"}\n\n"
+				"// The guard holds both patches' first inner ring: at inside factor n >= 3 it lies\n"
+				"// 2 / (3n) of the height from the edge (a land leg: 28u of 128u). At n = 2 it is the\n"
+				"// centroid, and the fan to it off a straight flat edge is the same plane.\n"
+				"bool FlatEdge(float2 a, float2 b)\n"
+				"{\n"
+				"\tconst float guard = max(kFlatGuard, 0.3f * length(b - a));\n"
+				"\treturn FlatBox(min(a, b) - guard, max(a, b) + guard);\n"
+				"}\n\n";
+
+			return out;
+		}
+
+		std::string EmitPatchConstants(bool a_tessellate, Mode a_mode)
 		{
 			std::string out =
 				"struct PatchConstants\n"
@@ -546,6 +714,11 @@ namespace Tessellation
 					Settings::tessellationFactorSnap);
 			}
 
+			const bool flat = FlatRuleEmitted(a_mode);
+			if (flat) {
+				out += EmitFlatRule(bounded);
+			}
+
 			if (EdgeWrapperEmitted()) {
 				out +=
 					"float EdgeTess(float3 a, float3 b, float wa, float wb)\n"
@@ -616,8 +789,51 @@ namespace Tessellation
 				"\to.edges[1] = EdgeFactor(p2, p0);\n"
 				"\to.edges[2] = EdgeFactor(p0, p1);\n";
 
+			out += "\to.inside   = max(o.edges[0], max(o.edges[1], o.edges[2]));\n";
+
+			if (flat) {
+				// Each edge is judged from its own two snapped corners, so both patches on it
+				// agree. The inside keeps the unflattened edges' factor, so a patch that is not
+				// flat keeps its inner rings; a flat patch is one triangle.
+				out +=
+					"\n\t[branch] if ((LiftClass.Load(int3(0, 0, 0)) & kLiftBound) != 0u) {\n"
+					"\t\tfloat2 q0, q1, q2;\n"
+					"\t\tconst bool g0 = LandCorner(p0, q0);\n"
+					"\t\tconst bool g1 = LandCorner(p1, q1);\n"
+					"\t\tconst bool g2 = LandCorner(p2, q2);\n"
+					"\t\tbool e0 = false;\n"
+					"\t\tbool e1 = false;\n"
+					"\t\tbool e2 = false;\n"
+					"\t\t[branch] if (g1 && g2) {\n"
+					"\t\t\te0 = FlatEdge(q1, q2);\n"
+					"\t\t}\n"
+					"\t\t[branch] if (g2 && g0) {\n"
+					"\t\t\te1 = FlatEdge(q2, q0);\n"
+					"\t\t}\n"
+					"\t\t[branch] if (g0 && g1) {\n"
+					"\t\t\te2 = FlatEdge(q0, q1);\n"
+					"\t\t}\n\n"
+					"\t\t// A land triangle's diagonal has the patch's box, and its guard covers the patch.\n"
+					"\t\tbool inside = false;\n"
+					"\t\t[branch] if (g0 && g1 && g2) {\n"
+					"\t\t\tconst float2 lo = min(q0, min(q1, q2));\n"
+					"\t\t\tconst float2 hi = max(q0, max(q1, q2));\n"
+					"\t\t\tinside =\n"
+					"\t\t\t\t(e0 && all(min(q1, q2) == lo) && all(max(q1, q2) == hi)) ||\n"
+					"\t\t\t\t(e1 && all(min(q2, q0) == lo) && all(max(q2, q0) == hi)) ||\n"
+					"\t\t\t\t(e2 && all(min(q0, q1) == lo) && all(max(q0, q1) == hi));\n"
+					"\t\t\t[branch] if (!inside) {\n"
+					"\t\t\t\tinside = FlatBox(lo - kFlatGuard, hi + kFlatGuard);\n"
+					"\t\t\t}\n"
+					"\t\t}\n\n"
+					"\t\to.edges[0] = e0 ? 1.0f : o.edges[0];\n"
+					"\t\to.edges[1] = e1 ? 1.0f : o.edges[1];\n"
+					"\t\to.edges[2] = e2 ? 1.0f : o.edges[2];\n"
+					"\t\to.inside   = inside ? 1.0f : o.inside;\n"
+					"\t}\n";
+			}
+
 			out +=
-				"\to.inside   = max(o.edges[0], max(o.edges[1], o.edges[2]));\n"
 				"\treturn o;\n"
 				"}\n\n";
 
@@ -1074,7 +1290,7 @@ namespace Tessellation
 
 			const std::string common = EmitStruct(a_signature) +
 			                           EmitPrologue(displace, a_mode) +
-			                           EmitPatchConstants(tessellate);
+			                           EmitPatchConstants(tessellate, a_mode);
 
 			const std::string hsSource = common + EmitHull(Settings::tessellationWinding);
 			const std::string dsSource = common + EmitDomain(a_signature, displace, a_mode);

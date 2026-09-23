@@ -1265,6 +1265,11 @@ namespace Hooks
 					}
 				}
 
+				// After this frame's coverage and cap uploads, before the depth prepass.
+				if (Settings::useClipmap) {
+					Clipmap::UpdateLiftClass(!indoors);
+				}
+
 				SnowSparkle::Update(step);
 
 				ActorPaint::Update(step);

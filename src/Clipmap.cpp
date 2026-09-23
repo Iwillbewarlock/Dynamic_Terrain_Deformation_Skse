@@ -111,6 +111,15 @@ namespace Clipmap
 		ID3D11Buffer*              g_groupArgs{ nullptr };
 		ID3D11UnorderedAccessView* g_groupArgsUAV{ nullptr };
 
+		// The lift class map (kLiftClassShader), made on first use by TessellationSkipFlat.
+		// The shaders are without and with the mesh cap.
+		ID3D11Texture2D*           g_liftClass{ nullptr };
+		ID3D11UnorderedAccessView* g_liftClassUAV{ nullptr };
+		ID3D11ShaderResourceView*  g_liftClassSRV{ nullptr };
+		ID3D11ComputeShader*       g_liftClassCS[2]{};
+		bool                       g_liftClassFailed{ false };
+		bool                       g_liftClassKnown{ false };
+
 		ID3D11SamplerState*        g_sampler{ nullptr };
 		ID3D11ComputeShader*       g_updateCS{ nullptr };
 		ID3D11ComputeShader*       g_updateListedCS{ nullptr };
@@ -413,6 +422,33 @@ namespace Clipmap
 
 			return CompileComputeShader(a_device, kGroupListShader, "ClipmapGroupListCS",
 				&g_groupListCS);
+		}
+
+		bool CreateLiftClass(ID3D11Device* a_device)
+		{
+			D3D11_TEXTURE2D_DESC desc{};
+			desc.Width = kLiftClassTexels;
+			desc.Height = kLiftClassTexels;
+			desc.MipLevels = 1;
+			desc.ArraySize = 1;
+			desc.Format = DXGI_FORMAT_R8_UINT;
+			desc.SampleDesc.Count = 1;
+			desc.Usage = D3D11_USAGE_DEFAULT;
+			desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+
+			// Zero: not bound, so nothing is flat until the first build.
+			const std::vector<uint8_t> zeros(static_cast<size_t>(kLiftClassTexels) * kLiftClassTexels, 0);
+			D3D11_SUBRESOURCE_DATA     initial{};
+			initial.pSysMem = zeros.data();
+			initial.SysMemPitch = kLiftClassTexels;
+
+			return SUCCEEDED(a_device->CreateTexture2D(&desc, &initial, &g_liftClass)) &&
+			       SUCCEEDED(a_device->CreateUnorderedAccessView(g_liftClass, nullptr, &g_liftClassUAV)) &&
+			       SUCCEEDED(a_device->CreateShaderResourceView(g_liftClass, nullptr, &g_liftClassSRV)) &&
+			       CompileComputeShader(a_device, LiftClassShaderSource(false), "ClipmapLiftClassCS",
+					   &g_liftClassCS[0]) &&
+			       CompileComputeShader(a_device, LiftClassShaderSource(true), "ClipmapLiftClassCS (mesh cap)",
+					   &g_liftClassCS[1]);
 		}
 
 		void CollectActors(std::vector<RE::ActorPtr>& a_out)
@@ -848,6 +884,14 @@ namespace Clipmap
 		drop(g_updateListedCS);
 		drop(g_sampler);
 
+		drop(g_liftClassCS[0]);
+		drop(g_liftClassCS[1]);
+		drop(g_liftClassSRV);
+		drop(g_liftClassUAV);
+		drop(g_liftClass);
+		g_liftClassFailed = false;
+		g_liftClassKnown = false;
+
 		drop(g_groupListCS);
 		drop(g_groupArgsUAV);
 		drop(g_groupArgs);
@@ -1103,6 +1147,13 @@ namespace Clipmap
 				std::memcpy(mapped.pData, &params, sizeof(params));
 				context->Unmap(g_paramsCB, 0);
 
+				// Invariant: after this level's update, Activity holds the max |h| of every
+				// cell of the Field just written, and of the eight cells around it. The flat
+				// rule (TessellationSkipFlat) reads a zero as proof that the field is exactly
+				// 0 there, so the clear and the dispatch must stay together, and a group the
+				// dispatch leaves out must hold +0.0 (the group lists only leave those out).
+				// A skipped update must skip the clear too; an update that leaves out marked
+				// groups must keep their activity, or the rule must be off.
 				const UINT zero[4] = { 0, 0, 0, 0 };
 				context->ClearUnorderedAccessViewUint(g_activityUAV[level], zero);
 
@@ -1154,6 +1205,62 @@ namespace Clipmap
 		}
 	}
 
+	void UpdateLiftClass(bool a_outdoors)
+	{
+		if (!Settings::tessellationSkipFlat || !Ready()) {
+			return;
+		}
+
+		auto* context = globals::d3d::context;
+
+		if (!g_liftClass && !g_liftClassFailed && !CreateLiftClass(globals::d3d::device)) {
+			logger::error("Clipmap: lift class map unavailable, TessellationSkipFlat does nothing");
+			const auto drop = [](auto*& a_ptr) {
+				if (a_ptr) {
+					a_ptr->Release();
+					a_ptr = nullptr;
+				}
+			};
+			drop(g_liftClassCS[0]);
+			drop(g_liftClassCS[1]);
+			drop(g_liftClassSRV);
+			drop(g_liftClassUAV);
+			drop(g_liftClass);
+			g_liftClassFailed = true;
+		}
+		if (!g_liftClass) {
+			return;
+		}
+
+		// Indoors the maps stop updating (the interior gate), so nothing is flat there.
+		if (!a_outdoors) {
+			if (g_liftClassKnown) {
+				const UINT zero[4] = { 0, 0, 0, 0 };
+				context->ClearUnorderedAccessViewUint(g_liftClassUAV, zero);
+				g_liftClassKnown = false;
+			}
+			return;
+		}
+
+		const ComputeStageGuard guard(context);
+		const UINT noOffset[kComputeUAVs] = { static_cast<UINT>(-1), static_cast<UINT>(-1),
+			static_cast<UINT>(-1), static_cast<UINT>(-1) };
+
+		// The views the domain shader samples: missing ones read 0 there and here.
+		ID3D11ShaderResourceView* maps[2] = { SnowCoverage::View(), Shelter::View() };
+		ID3D11UnorderedAccessView* uavs[kComputeUAVs] = { g_liftClassUAV };
+		context->CSSetShader(g_liftClassCS[Settings::shelterMeshCap ? 1 : 0], nullptr, 0);
+		context->CSSetShaderResources(0, 2, maps);
+		context->CSSetUnorderedAccessViews(0, kComputeUAVs, uavs, noOffset);
+		context->Dispatch(kLiftClassTexels / 8, kLiftClassTexels / 8, 1);
+		g_liftClassKnown = true;
+
+		ID3D11UnorderedAccessView* nullUAVs[kComputeUAVs] = {};
+		ID3D11ShaderResourceView*  nullMaps[2] = {};
+		context->CSSetUnorderedAccessViews(0, kComputeUAVs, nullUAVs, noOffset);
+		context->CSSetShaderResources(0, 2, nullMaps);
+	}
+
 	// Called while Update is skipped (indoors): the next Update reseeds every level as a
 	// window jump does, and actor motion starts fresh instead of from before the skip.
 	void ForgetWindow()
@@ -1185,11 +1292,21 @@ namespace Clipmap
 		a_context->DSSetConstantBuffers(kParamsSlot, 1, &g_windowCB);
 		a_context->HSSetConstantBuffers(kParamsSlot, 1, &g_windowCB);
 
-		if (g_activitySRV[0]) {
+		// The flat-patch rule reads both activity maps and the lift class map. They go in
+		// one call and only together, so a class map that is bound (its kLiftBound bit)
+		// vouches for the activity views next to it.
+		const bool coarse = LevelCount() > 1;
+		if (Settings::tessellationSkipFlat && g_activitySRV[0] && g_liftClassSRV &&
+			(!coarse || g_activitySRV[1])) {
+			ID3D11ShaderResourceView* hull[3] = { g_activitySRV[0], coarse ? g_activitySRV[1] : nullptr,
+				g_liftClassSRV };
+			static_assert(kActivity1Slot == kActivitySlot + 1 && kLiftClassSlot == kActivitySlot + 2);
+			a_context->HSSetShaderResources(kActivitySlot, 3, hull);
+		} else if (g_activitySRV[0]) {
 			a_context->HSSetShaderResources(kActivitySlot, 1, &g_activitySRV[0]);
 		}
 
-		if (LevelCount() > 1 && g_srv[1]) {
+		if (coarse && g_srv[1]) {
 			a_context->DSSetShaderResources(kLevel1Slot, 1, &g_srv[1]);
 		}
 	}
@@ -1198,11 +1315,12 @@ namespace Clipmap
 	{
 
 		ID3D11ShaderResourceView* nullSRV = nullptr;
+		ID3D11ShaderResourceView* nullHull[3] = {};
 		ID3D11SamplerState*       nullSampler = nullptr;
 		ID3D11Buffer* nullCB = nullptr;
 		a_context->DSSetShaderResources(0, 1, &nullSRV);
 		a_context->DSSetShaderResources(kLevel1Slot, 1, &nullSRV);
-		a_context->HSSetShaderResources(kActivitySlot, 1, &nullSRV);
+		a_context->HSSetShaderResources(kActivitySlot, Settings::tessellationSkipFlat ? 3 : 1, nullHull);
 		a_context->DSSetSamplers(0, 1, &nullSampler);
 		a_context->DSSetConstantBuffers(kParamsSlot, 1, &nullCB);
 		a_context->HSSetConstantBuffers(kParamsSlot, 1, &nullCB);

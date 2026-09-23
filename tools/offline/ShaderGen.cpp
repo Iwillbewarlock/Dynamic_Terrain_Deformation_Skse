@@ -237,7 +237,7 @@ namespace
 
 		const std::string common = Tessellation::EmitStruct(a_signature) +
 		                           Tessellation::EmitPrologue(displace, a_mode) +
-		                           Tessellation::EmitPatchConstants(tessellate);
+		                           Tessellation::EmitPatchConstants(tessellate, a_mode);
 
 		Check(common + Tessellation::EmitHull(Settings::tessellationWinding), "hs_5_0",
 			std::string(a_name) + "_hs", a_outDir);
@@ -251,7 +251,7 @@ namespace
 	{
 		const std::string source = Tessellation::EmitStruct(a_signature) +
 		                           Tessellation::EmitPrologue(true, a_mode) +
-		                           Tessellation::EmitPatchConstants(true) +
+		                           Tessellation::EmitPatchConstants(true, a_mode) +
 		                           Tessellation::EmitHull(Settings::tessellationWinding);
 
 		ID3DBlob* code = nullptr;
@@ -323,7 +323,7 @@ namespace
 
 		const std::string common = Tessellation::EmitStruct(a_signature) +
 		                           Tessellation::EmitPrologue(displace, a_mode) +
-		                           Tessellation::EmitPatchConstants(tessellate);
+		                           Tessellation::EmitPatchConstants(tessellate, a_mode);
 		const std::pair<std::string, const char*> stages[] = {
 			{ common + Tessellation::EmitHull(Settings::tessellationWinding), "hs_5_0" },
 			{ common + Tessellation::EmitDomain(a_signature, displace, a_mode), "ds_5_0" },
@@ -395,19 +395,21 @@ namespace
 		const bool  canonical = Settings::tessellationCanonicalEdges;
 		const float snap = Settings::tessellationFactorSnap;
 		const int   tint = Settings::debugTessellationColour;
+		const bool  flat = Settings::tessellationSkipFlat;
 		SetSavings(false, false, 0.0f, false);
 		Settings::debugTessellationColour = 0;
+		Settings::tessellationSkipFlat = false;
 
 		const char* const added[] = { "kDisplaceBound", "PatchOffScreen", "FrustumSides",
 			"ScreenCap", "Screen;", "WindowReserved", "EdgeTess", "kFactorSnap", "placed",
-			"pc.inside" };
+			"pc.inside", "LiftClass", "FieldActivity1", "FlatBox", "LandCorner" };
 		int found = 0;
 		for (const auto mode : { Tessellation::Mode::kLandscape, Tessellation::Mode::kBloodDecal }) {
 			for (const auto& signature : { ColourSignature(), DepthPrepassSignature() }) {
 				const bool displace = Tessellation::WantsDisplacement(mode);
 				const std::string text =
 					Tessellation::EmitPrologue(displace, mode) +
-					Tessellation::EmitPatchConstants(Tessellation::WantsSubdivision(mode)) +
+					Tessellation::EmitPatchConstants(Tessellation::WantsSubdivision(mode), mode) +
 					Tessellation::EmitDomain(signature, displace, mode);
 				for (const char* word : added) {
 					if (text.find(word) != std::string::npos) {
@@ -424,6 +426,42 @@ namespace
 
 		SetSavings(cull, cap, snap, canonical);
 		Settings::debugTessellationColour = tint;
+		Settings::tessellationSkipFlat = flat;
+	}
+
+	// TessellationSkipFlat emits its rule for near land only, and not under a constant or
+	// debug lift, which no patch escapes.
+	void CheckFlatText()
+	{
+		const auto emitted = [](Tessellation::Mode a_mode) {
+			return Tessellation::EmitPatchConstants(Tessellation::WantsSubdivision(a_mode), a_mode)
+			           .find("FlatBox") != std::string::npos;
+		};
+
+		int bad = 0;
+		const auto expect = [&](const char* a_case, bool a_want, bool a_got) {
+			if (a_want != a_got) {
+				++bad;
+				std::printf("  FAIL  flat rule %s: expected %s\n", a_case, a_want ? "emitted" : "absent");
+			}
+		};
+
+		Settings::tessellationSkipFlat = true;
+		expect("land", true, emitted(Tessellation::Mode::kLandscape));
+		expect("blood decal", false, emitted(Tessellation::Mode::kBloodDecal));
+		Settings::debugWorldZOffset = 40.0f;
+		expect("land with DebugWorldZOffset", false, emitted(Tessellation::Mode::kLandscape));
+		Settings::debugWorldZOffset = 0.0f;
+		Settings::debugWaveAmplitude = 8.0f;
+		expect("land with DebugWaveAmplitude", false, emitted(Tessellation::Mode::kLandscape));
+		Settings::debugWaveAmplitude = 0.0f;
+		Settings::tessellationSkipFlat = false;
+		expect("land with the switch off", false, emitted(Tessellation::Mode::kLandscape));
+
+		if (bad == 0) {
+			std::puts("  PASS  flat rule on land only, not under a constant or wave lift, off by switch");
+		}
+		g_failures += bad;
 	}
 }
 
@@ -433,7 +471,7 @@ void CheckAsyncCompiler()
     const bool displace = Tessellation::WantsDisplacement(Tessellation::Mode::kLandscape);
     const auto common = Tessellation::EmitStruct(signature) +
         Tessellation::EmitPrologue(displace, Tessellation::Mode::kLandscape) +
-        Tessellation::EmitPatchConstants(true);
+        Tessellation::EmitPatchConstants(true, Tessellation::Mode::kLandscape);
     ShaderCompiler::Worker worker;
     auto job = std::make_shared<ShaderCompiler::Job>();
     job->hullSource = common + Tessellation::EmitHull(Settings::tessellationWinding);
@@ -491,6 +529,8 @@ int main(int a_argc, char** a_argv)
 	GenerateCompute(outDir, Clipmap::UpdateShaderSource(), "ClipmapUpdateCS", "clipmap_update");
 	GenerateCompute(outDir, Clipmap::UpdateShaderSource(), "ClipmapUpdateCS", "clipmap_update_listed", true);
 	GenerateCompute(outDir, Clipmap::kGroupListShader, "ClipmapGroupListCS", "clipmap_group_list");
+	GenerateCompute(outDir, Clipmap::LiftClassShaderSource(false), "ClipmapLiftClassCS", "clipmap_lift_class");
+	GenerateCompute(outDir, Clipmap::LiftClassShaderSource(true), "ClipmapLiftClassCS", "clipmap_lift_class_cap");
 	GenerateShapeAnalysis(outDir);
 
 	std::printf("\nDefault configuration (clipmap, normals, surface material)\n");
@@ -714,6 +754,41 @@ int main(int a_argc, char** a_argv)
 		SetSavings(defaultCull, defaultCap, defaultSnap, defaultCanonical);
 		Settings::terrainBlendingCompatibility = false;
 		Settings::clipmapLevels = 2;
+
+		std::printf("\nFlat patches (TessellationSkipFlat)\n");
+		const bool defaultMeshCap = Settings::shelterMeshCap;
+		Settings::tessellationSkipFlat = true;
+		Settings::shelterMeshCap = true;
+		Generate("flat_colour", ColourSignature(), outDir);
+		Generate("flat_depth", DepthPrepassSignature(), outDir);
+		Generate("flat_blood", ColourSignature(), outDir, Tessellation::Mode::kBloodDecal);
+		Settings::clipmapLevels = 1;
+		Generate("flat_one_level", DepthPrepassSignature(), outDir);
+		Settings::clipmapLevels = 2;
+		Settings::enableTessellationBounds = false;
+		Generate("flat_unbounded", ColourSignature(), outDir);
+		Settings::enableTessellationBounds = true;
+		Settings::shelterMeshCap = false;
+		Generate("flat_no_cap", ColourSignature(), outDir);
+		Settings::shelterMeshCap = true;
+		Settings::enableSnowRaise = false;
+		Generate("flat_no_raise", ColourSignature(), outDir);
+		Settings::enableSnowRaise = true;
+		SetSavings(false, false, 0.0f, false);
+		Generate("flat_no_savings", ColourSignature(), outDir);
+		for (const bool blend : { false, true }) {
+			for (const uint32_t levels : { 1u, 2u }) {
+				SetSavings(true, false, 0.015625f, true);
+				Settings::terrainBlendingCompatibility = blend;
+				Settings::clipmapLevels = levels;
+				CheckSameFactors(std::format("factors flat shipped tb={} levels={}", blend ? 1 : 0, levels));
+			}
+		}
+		SetSavings(defaultCull, defaultCap, defaultSnap, defaultCanonical);
+		Settings::terrainBlendingCompatibility = false;
+		Settings::clipmapLevels = 2;
+		CheckFlatText();
+		Settings::shelterMeshCap = defaultMeshCap;
 
 		Settings::enableSnowRaise = false;
 		Settings::snowRaiseHeight = 0.0f;

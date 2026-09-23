@@ -733,4 +733,58 @@ void main(uint3 group : SV_DispatchThreadID, uint groupIndex : SV_GroupIndex)
 	}
 }
 )";
+
+	// The lift class map of the flat-patch rule (TessellationSkipFlat), built from the snow
+	// coverage and mesh cap views the domain shader samples, after both uploaded this frame.
+	// SnowRaise at x filters texels c and c + 1 per axis, c = floor(x / 64 - 0.5) (its
+	// smoothstep remap keeps the pair); class texel b covers c = 2b .. 2b + 3, that is texels
+	// 2b .. 2b + 4, wrapping as the samplers do.
+	// - kLiftNone: every coverage texel is below 128/255, so the filtered cover is at most 0.5
+	//   and smoothstep(0.5, 1, cover) is exactly 0.
+	// - kLiftFull: every coverage texel and, with MESH_CAP, every cap texel is 255, so both
+	//   filter to exactly 1: the full lift.
+	// - kLiftBound is always set, so a map that is not bound (reads 0) proves nothing.
+	constexpr char kLiftClassShader[] = R"(
+Texture2D<float>  SnowCoverageMap : register(t0);
+Texture2D<float>  SnowMeshCapMap  : register(t1);
+RWTexture2D<uint> LiftClass       : register(u0);
+
+[numthreads(8, 8, 1)]
+void main(uint3 id : SV_DispatchThreadID)
+{
+	bool none = true;
+	bool full = true;
+	[unroll] for (int y = 0; y < 5; ++y) {
+		[unroll] for (int x = 0; x < 5; ++x) {
+			const int2  t = int2(id.xy) * 2 + int2(x, y);
+			const float cover = SnowCoverageMap.Load(int3(t & kCoverageMask, 0));
+			none = none && cover < 0.5f;
+			full = full && cover >= 1.0f;
+#ifdef MESH_CAP
+			full = full && SnowMeshCapMap.Load(int3(t & kMeshCapMask, 0)) >= 1.0f;
+#endif
+		}
+	}
+	LiftClass[id.xy] = kLiftBound | (none ? kLiftNone : 0u) | (full ? kLiftFull : 0u);
+}
+)";
+
+	inline std::string LiftClassShaderSource(bool a_meshCap)
+	{
+		static_assert(SnowCoverage::kTexels == 2 * kLiftClassTexels &&
+						  SnowCoverage::kTexels % Shelter::kTexels == 0 &&
+						  SnowCoverage::kTexelSize == Shelter::kTexelSize,
+			"a class texel must cover the same coverage and cap texels wherever it wraps");
+
+		return std::format(
+				   "{}"
+				   "static const int  kCoverageMask = {};\n"
+				   "static const int  kMeshCapMask  = {};\n"
+				   "static const uint kLiftBound    = {}u;\n"
+				   "static const uint kLiftNone     = {}u;\n"
+				   "static const uint kLiftFull     = {}u;\n",
+				   a_meshCap ? "#define MESH_CAP 1\n" : "", SnowCoverage::kTexels - 1,
+				   Shelter::kTexels - 1, kLiftBound, kLiftNone, kLiftFull) +
+			kLiftClassShader;
+	}
 }

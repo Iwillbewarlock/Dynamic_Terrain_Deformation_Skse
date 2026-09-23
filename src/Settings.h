@@ -159,6 +159,13 @@ namespace Settings
 
 	inline bool tessellationCanonicalEdges{ true };
 
+	// Factor 1 for near-land patches whose surface offset is provably 0 or one constant snow
+	// lift this frame (no field on any level that reaches them, and snow coverage below half,
+	// or full with no mesh cap, where the lift is not fading). The surface is the same plane at
+	// any factor, but fewer, larger triangles rasterise to slightly different depth and
+	// interpolants (float rounding), so it stays off until that is signed off in game.
+	inline bool tessellationSkipFlat{ false };
+
 	inline bool cullDistantDraws{ true };
 
 	inline float cullMargin{ 256.0f };

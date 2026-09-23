@@ -54,6 +54,16 @@ namespace Clipmap
 
 	inline constexpr uint32_t kActivitySlot = 0;
 
+	// Hull shader slots of the flat-patch rule, bound with kActivitySlot in one call.
+	inline constexpr uint32_t kActivity1Slot = 1;
+	inline constexpr uint32_t kLiftClassSlot = 2;
+
+	// The lift class map (kLiftClassShader): one texel per two snow coverage texels.
+	inline constexpr uint32_t kLiftClassTexels = 128;
+	inline constexpr uint32_t kLiftBound = 1;
+	inline constexpr uint32_t kLiftNone = 2;
+	inline constexpr uint32_t kLiftFull = 4;
+
 	inline constexpr uint32_t kLevel1Slot = 2;
 
 	inline constexpr uint32_t kMaxStamps = 64;
@@ -112,6 +122,12 @@ namespace Clipmap
 	bool Ready();
 
 	void Update(float a_deltaSeconds);
+
+	// Rebuilds the lift class map from this frame's snow coverage and mesh cap, or with
+	// a_outdoors false marks it unknown, for TessellationSkipFlat. Runs every frame after
+	// SnowCoverage::Update and Shelter::Update (a cap upload does not change the Shelter
+	// revision), before the depth prepass.
+	void UpdateLiftClass(bool a_outdoors);
 
 	void ForgetWindow();
 

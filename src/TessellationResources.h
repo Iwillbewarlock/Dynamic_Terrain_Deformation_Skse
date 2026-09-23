@@ -13,7 +13,7 @@ namespace Tessellation
 		ID3D11Buffer* domainBuffers[4]{};
 		ID3D11Buffer* hullBuffers[2]{};
 		ID3D11ShaderResourceView* domainViews[4]{};
-		ID3D11ShaderResourceView* hullViews[1]{};
+		ID3D11ShaderResourceView* hullViews[3]{};  // Clipmap::BindDomain: t0 (t1, t2 with TessellationSkipFlat)
 		ID3D11SamplerState* domainSamplers[3]{};
 
 		SavedResources() = default;
@@ -41,7 +41,7 @@ namespace Tessellation
 			context->DSGetConstantBuffers(10, 4, domainBuffers);
 			context->HSGetConstantBuffers(12, 2, hullBuffers);
 			context->DSGetShaderResources(0, 4, domainViews);
-			context->HSGetShaderResources(0, 1, hullViews);
+			context->HSGetShaderResources(0, 3, hullViews);
 			context->DSGetSamplers(0, 3, domainSamplers);
 		}
 
@@ -50,7 +50,7 @@ namespace Tessellation
 			context->DSSetConstantBuffers(10, 4, domainBuffers);
 			context->HSSetConstantBuffers(12, 2, hullBuffers);
 			context->DSSetShaderResources(0, 4, domainViews);
-			context->HSSetShaderResources(0, 1, hullViews);
+			context->HSSetShaderResources(0, 3, hullViews);
 			context->DSSetSamplers(0, 3, domainSamplers);
 			Release();
 		}
