@@ -75,6 +75,11 @@ if(BUILD_OFFLINE_TOOLS)
     target_include_directories(StampSurfaceTest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_compile_features(StampSurfaceTest PRIVATE cxx_std_23)
     target_link_libraries(StampSurfaceTest PRIVATE d3d11.lib d3dcompiler.lib bcrypt.lib)
+
+    add_executable(ClipmapCSBench tools/offline/ClipmapCSBench.cpp)
+    target_include_directories(ClipmapCSBench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_compile_features(ClipmapCSBench PRIVATE cxx_std_23)
+    target_link_libraries(ClipmapCSBench PRIVATE d3d11.lib d3dcompiler.lib)
 endif()
 
 if(DEFINED ENV{SKYRIM_FOLDER} AND IS_DIRECTORY "$ENV{SKYRIM_FOLDER}/Data")
