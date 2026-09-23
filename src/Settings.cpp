@@ -717,6 +717,9 @@ namespace Settings
 		} else if (key == "DebugFieldColour" || key == "DebugFieldColor") {
 			debugFieldColour =
 				static_cast<int>(Clamped(key, AsFloat(key, value, 0), 0.0f, 3.0f));
+		} else if (key == "DebugTessellationColour" || key == "DebugTessellationColor") {
+			debugTessellationColour =
+				static_cast<int>(Clamped(key, AsFloat(key, value, 0), 0.0f, 1.0f));
 		} else if (key == "DebugWaveLength") {
 			debugWaveLength = std::max(AsFloat(key, value, 256.0f), 1.0f);
 		} else if (key == "EnableProfiler") {
@@ -834,9 +837,10 @@ namespace Settings
 			tessellationTargetSpacing, tessellationMaxFactor);
 
 		logger::info("Hull savings: frustum cull={} (displace bound {}) | screen cap={} ({} px per "
-					 "generated edge) | factor snap={} | canonical edges={}; hull cull v1",
+					 "generated edge) | factor snap={} | canonical edges={} | tint={}; hull cull v1",
 			tessellationFrustumCull, tessellationDisplaceBound, tessellationScreenCap,
-			tessellationScreenPixels, tessellationFactorSnap, tessellationCanonicalEdges);
+			tessellationScreenPixels, tessellationFactorSnap, tessellationCanonicalEdges,
+			debugTessellationColour);
 
 		logger::info("Snow raise: enabled={} | height={} | weather={} | distance={} "
 					 "fade={} | coverage budget={}/frame",

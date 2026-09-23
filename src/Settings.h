@@ -368,6 +368,8 @@ namespace Settings
 
 	inline int debugFieldColour{ 0 };
 
+	inline int debugTessellationColour{ 0 };
+
 	inline bool enableProfiler{ false };
 
 	inline float profileInterval{ 5.0f };

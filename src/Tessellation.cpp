@@ -789,6 +789,28 @@ namespace Tessellation
 			return out;
 		}
 
+		std::string EmitTessellationDebug(const Reflection::Signature& a_signature)
+		{
+			if (Settings::debugTessellationColour <= 0) {
+				return {};
+			}
+
+			const int c0 = IndexOf(a_signature, "COLOR", 0);
+			if (c0 < 0) {
+				return {};
+			}
+
+			// log2 scale of the patch's inside factor: 1 blue, about sqrt(max) green, max red.
+			return std::format(
+				"\n\t\n"
+				"\t{{\n"
+				"\t\tconst float t = saturate(log2(max(pc.inside, 1.0f)) / max(log2(kMaxTess), 1.0f));\n"
+				"\t\to.f{0}.rgb = saturate(float3(2.0f * t - 0.5f, 1.0f - abs(2.0f * t - 1.0f),\n"
+				"\t\t\t1.5f - 2.0f * t));\n"
+				"\t}}\n",
+				c0);
+		}
+
 		std::string EmitActorPaint(const Reflection::Signature& a_signature)
 		{
 			const int c0 = IndexOf(a_signature, "COLOR", 0);
@@ -950,6 +972,7 @@ namespace Tessellation
 					out += EmitBlendWeights(a_signature);
 
 					out += EmitFieldDebug(a_signature);
+					out += EmitTessellationDebug(a_signature);
 				}
 			}
 

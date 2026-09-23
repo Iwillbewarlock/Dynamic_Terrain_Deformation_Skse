@@ -80,6 +80,17 @@ if(BUILD_OFFLINE_TOOLS)
     target_include_directories(ClipmapCSBench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_compile_features(ClipmapCSBench PRIVATE cxx_std_23)
     target_link_libraries(ClipmapCSBench PRIVATE d3d11.lib d3dcompiler.lib)
+
+    # Runs the generated hull and domain shaders on WARP (minutes). Not part of build.cmd.
+    add_executable(HullFactorCheck tools/offline/HullFactorCheck.cpp)
+
+    target_include_directories(HullFactorCheck PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/tools/offline
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+
+    target_compile_features(HullFactorCheck PRIVATE cxx_std_23)
+    target_link_libraries(HullFactorCheck PRIVATE d3d11.lib d3dcompiler.lib dxguid.lib bcrypt.lib)
 endif()
 
 if(DEFINED ENV{SKYRIM_FOLDER} AND IS_DIRECTORY "$ENV{SKYRIM_FOLDER}/Data")

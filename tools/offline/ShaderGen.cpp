@@ -243,6 +243,187 @@ namespace
 		Check(common + Tessellation::EmitDomain(a_signature, displace, a_mode), "ds_5_0",
 			std::string(a_name) + "_ds", a_outDir);
 	}
+
+	// Disassembled patch-constant phases (hs_fork/hs_join) of the hull shader built for a
+	// signature. Colour and depth prepass must match text for text, or depth-equal breaks.
+	std::string FactorPhase(const Reflection::Signature& a_signature, Tessellation::Mode a_mode)
+	{
+		const std::string source = Tessellation::EmitStruct(a_signature) +
+		                           Tessellation::EmitPrologue(true, a_mode) +
+		                           Tessellation::EmitPatchConstants(true) +
+		                           Tessellation::EmitHull(Settings::tessellationWinding);
+
+		ID3DBlob* code = nullptr;
+		ID3DBlob* errors = nullptr;
+		std::string phase;
+		if (SUCCEEDED(D3DCompile(source.c_str(), source.size(), "factors", nullptr, nullptr,
+				"main", "hs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &errors))) {
+			ID3DBlob* text = nullptr;
+			if (SUCCEEDED(D3DDisassemble(code->GetBufferPointer(), code->GetBufferSize(), 0,
+					nullptr, &text))) {
+				const std::string all(static_cast<const char*>(text->GetBufferPointer()),
+					text->GetBufferSize());
+				size_t start = all.find("hs_fork_phase");
+				if (start == std::string::npos) {
+					start = all.find("hs_join_phase");
+				}
+				if (start != std::string::npos) {
+					phase = all.substr(start);
+				}
+				text->Release();
+			}
+		}
+		if (code) {
+			code->Release();
+		}
+		if (errors) {
+			errors->Release();
+		}
+		return phase;
+	}
+
+	void CheckSameFactors(const std::string& a_label)
+	{
+		for (const auto mode : { Tessellation::Mode::kLandscape, Tessellation::Mode::kBloodDecal }) {
+			const std::string label =
+				a_label + (mode == Tessellation::Mode::kLandscape ? " land" : " blood");
+			const std::string colour = FactorPhase(ColourSignature(), mode);
+			const std::string depth = FactorPhase(DepthPrepassSignature(), mode);
+			if (colour.empty() || colour != depth) {
+				++g_failures;
+				std::printf("  FAIL  %-44s colour and depth patch-constant phases differ\n",
+					label.c_str());
+			} else {
+				std::printf("  PASS  %-44s colour == depth patch-constant phase (%zu chars)\n",
+					label.c_str(), colour.size());
+			}
+		}
+	}
+
+	// The generated ClipmapWindow (b13) must keep the layout of WindowCB in Clipmap.cpp:
+	// Window c0, Raise c1, Window1 or the WindowReserved pad c2, Screen c3, 64 bytes at most.
+	void CheckWindowLayout(const std::string& a_label, const Reflection::Signature& a_signature,
+		Tessellation::Mode a_mode)
+	{
+		const bool displace = Tessellation::WantsDisplacement(a_mode);
+		const bool tessellate = Tessellation::WantsSubdivision(a_mode);
+		const bool field = a_mode == Tessellation::Mode::kLandscape ||
+		                   a_mode == Tessellation::Mode::kBloodDecal;
+		const bool screen = field && Settings::useClipmap && Settings::tessellationScreenCap;
+		const bool coarse = Clipmap::LevelCount() > 1;
+
+		const std::pair<const char*, int> expected[] = {
+			{ "Window", 0 },
+			{ "Raise", 16 },
+			{ "Window1", coarse ? 32 : -1 },
+			{ "WindowReserved", screen && !coarse ? 32 : -1 },
+			{ "Screen", screen ? 48 : -1 },
+		};
+
+		const std::string common = Tessellation::EmitStruct(a_signature) +
+		                           Tessellation::EmitPrologue(displace, a_mode) +
+		                           Tessellation::EmitPatchConstants(tessellate);
+		const std::pair<std::string, const char*> stages[] = {
+			{ common + Tessellation::EmitHull(Settings::tessellationWinding), "hs_5_0" },
+			{ common + Tessellation::EmitDomain(a_signature, displace, a_mode), "ds_5_0" },
+		};
+
+		int bad = 0;
+		int bound = 0;
+		for (const auto& [source, target] : stages) {
+			ID3DBlob*               code = nullptr;
+			ID3DBlob*               errors = nullptr;
+			ID3D11ShaderReflection* reflection = nullptr;
+			if (FAILED(D3DCompile(source.c_str(), source.size(), "window", nullptr, nullptr,
+					"main", target, D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &errors)) ||
+				FAILED(D3DReflect(code->GetBufferPointer(), code->GetBufferSize(),
+					IID_ID3D11ShaderReflection, reinterpret_cast<void**>(&reflection)))) {
+				++bad;
+			} else {
+				auto* buffer = reflection->GetConstantBufferByName("ClipmapWindow");
+				D3D11_SHADER_BUFFER_DESC desc{};
+				if (SUCCEEDED(buffer->GetDesc(&desc))) {
+					++bound;
+					if (desc.Size > 64) {
+						++bad;
+					}
+					for (const auto& [name, offset] : expected) {
+						D3D11_SHADER_VARIABLE_DESC variable{};
+						const int at = SUCCEEDED(buffer->GetVariableByName(name)->GetDesc(&variable)) ?
+						                   static_cast<int>(variable.StartOffset) :
+						                   -1;
+						if (at != offset) {
+							++bad;
+							std::printf("        %s %s at %d, expected %d\n", target, name, at,
+								offset);
+						}
+					}
+				}
+			}
+			for (IUnknown* object : std::initializer_list<IUnknown*>{ code, errors, reflection }) {
+				if (object) {
+					object->Release();
+				}
+			}
+		}
+
+		// The domain shader always reads the window; the hull shader does when it tessellates.
+		if (bad > 0 || bound != (tessellate ? 2 : 1)) {
+			++g_failures;
+			std::printf("  FAIL  %-44s ClipmapWindow layout (%d stage%s bound)\n",
+				a_label.c_str(), bound, bound == 1 ? "" : "s");
+		} else {
+			std::printf("  PASS  %-44s ClipmapWindow matches WindowCB%s\n", a_label.c_str(),
+				screen ? ", Screen at c3" : "");
+		}
+	}
+
+	void SetSavings(bool a_cull, bool a_cap, float a_snap, bool a_canonical)
+	{
+		Settings::tessellationFrustumCull = a_cull;
+		Settings::tessellationScreenCap = a_cap;
+		Settings::tessellationFactorSnap = a_snap;
+		Settings::tessellationCanonicalEdges = a_canonical;
+	}
+
+	// With every new switch off, nothing the savings add may appear in any generated source.
+	void CheckLegacyText()
+	{
+		const bool  cull = Settings::tessellationFrustumCull;
+		const bool  cap = Settings::tessellationScreenCap;
+		const bool  canonical = Settings::tessellationCanonicalEdges;
+		const float snap = Settings::tessellationFactorSnap;
+		const int   tint = Settings::debugTessellationColour;
+		SetSavings(false, false, 0.0f, false);
+		Settings::debugTessellationColour = 0;
+
+		const char* const added[] = { "kDisplaceBound", "PatchOffScreen", "FrustumSides",
+			"ScreenCap", "Screen;", "WindowReserved", "EdgeTess", "kFactorSnap", "placed",
+			"pc.inside" };
+		int found = 0;
+		for (const auto mode : { Tessellation::Mode::kLandscape, Tessellation::Mode::kBloodDecal }) {
+			for (const auto& signature : { ColourSignature(), DepthPrepassSignature() }) {
+				const bool displace = Tessellation::WantsDisplacement(mode);
+				const std::string text =
+					Tessellation::EmitPrologue(displace, mode) +
+					Tessellation::EmitPatchConstants(Tessellation::WantsSubdivision(mode)) +
+					Tessellation::EmitDomain(signature, displace, mode);
+				for (const char* word : added) {
+					if (text.find(word) != std::string::npos) {
+						++found;
+						std::printf("  FAIL  all savings switches off still emit \"%s\"\n", word);
+					}
+				}
+			}
+		}
+		if (found == 0) {
+			std::puts("  PASS  all savings switches off emit none of the new code");
+		}
+		g_failures += found;
+
+		SetSavings(cull, cap, snap, canonical);
+		Settings::debugTessellationColour = tint;
+	}
 }
 
 void CheckAsyncCompiler()
@@ -285,7 +466,19 @@ void CheckAsyncCompiler()
 
 int main(int a_argc, char** a_argv)
 {
-	const std::filesystem::path outDir = a_argc > 1 ? a_argv[1] : "generated_shaders";
+	// --legacy: every hull-savings switch off, for a byte-for-byte diff against the old generator.
+	std::filesystem::path outDir = "generated_shaders";
+	bool legacy = false;
+	for (int i = 1; i < a_argc; ++i) {
+		if (std::string_view(a_argv[i]) == "--legacy") {
+			legacy = true;
+		} else {
+			outDir = a_argv[i];
+		}
+	}
+	if (legacy) {
+		SetSavings(false, false, 0.0f, false);
+	}
 	std::filesystem::create_directories(outDir);
 
 	Settings::enableTessellation = true;
@@ -424,6 +617,106 @@ int main(int a_argc, char** a_argv)
 	std::printf("\nCounter-clockwise winding\n");
 	Settings::tessellationWinding = "ccw";
 	Generate("ccw", ColourSignature(), outDir);
+
+	if (!legacy) {
+		std::printf("\nHull savings: frustum cull, screen cap, factor snap, canonical edges\n");
+		// Every switch on, the screen cap included (it ships off); the defaults come back after.
+		const bool  defaultCull = Settings::tessellationFrustumCull;
+		const bool  defaultCap = Settings::tessellationScreenCap;
+		const float defaultSnap = Settings::tessellationFactorSnap;
+		const bool  defaultCanonical = Settings::tessellationCanonicalEdges;
+		SetSavings(true, true, 0.015625f, true);
+		Settings::enableSnowRaise = true;
+		Settings::snowRaiseHeight = 35.0f;
+		Generate("savings_colour", ColourSignature(), outDir);
+		Generate("savings_depth", DepthPrepassSignature(), outDir);
+		Generate("savings_blood", ColourSignature(), outDir, Tessellation::Mode::kBloodDecal);
+		Settings::clipmapLevels = 1;
+		Generate("savings_one_level_colour", ColourSignature(), outDir);
+		Generate("savings_one_level_depth", DepthPrepassSignature(), outDir);
+		Settings::clipmapLevels = 2;
+		Settings::enableTessellationBounds = false;
+		Generate("savings_unbounded", ColourSignature(), outDir);
+		Settings::enableTessellationBounds = true;
+		Settings::debugWorldZOffset = 40.0f;
+		Generate("savings_zoffset", ColourSignature(), outDir);
+		Settings::debugWorldZOffset = 0.0f;
+		Settings::debugTessellationColour = 1;
+		Generate("tessdebug_colour", ColourSignature(), outDir);
+		Generate("tessdebug_depth", DepthPrepassSignature(), outDir);
+		Settings::debugTessellationColour = 0;
+
+		SetSavings(true, false, 0.0f, false);
+		Generate("cull_only_colour", ColourSignature(), outDir);
+		Generate("cull_only_depth", DepthPrepassSignature(), outDir);
+		SetSavings(false, true, 0.0f, false);
+		Generate("cap_only_colour", ColourSignature(), outDir);
+		Settings::clipmapLevels = 1;
+		Generate("cap_only_one_level", DepthPrepassSignature(), outDir);
+		Settings::clipmapLevels = 2;
+		SetSavings(false, false, 0.015625f, false);
+		Generate("snap_only_colour", ColourSignature(), outDir);
+		SetSavings(false, false, 0.0f, true);
+		Generate("canonical_only_colour", ColourSignature(), outDir);
+		SetSavings(false, false, 0.0f, false);
+		Generate("savings_off_colour", ColourSignature(), outDir);
+		Generate("savings_off_depth", DepthPrepassSignature(), outDir);
+		SetSavings(true, true, 0.015625f, true);
+
+		Settings::useClipmap = false;
+		Settings::debugWaveAmplitude = 8.0f;
+		Generate("savings_wave", ColourSignature(), outDir);
+		Settings::useClipmap = true;
+		Settings::debugWaveAmplitude = 0.0f;
+
+		std::printf("\nClipmapWindow (b13) as declared by every shader that binds it\n");
+		Settings::enableMeshRaise = true;
+		Settings::meshRaiseHeight = 32.0f;
+		for (const uint32_t levels : { 1u, 2u }) {
+			for (const bool cap : { false, true }) {
+				Settings::clipmapLevels = levels;
+				Settings::tessellationScreenCap = cap;
+				const std::string suffix = std::format(" levels={} cap={}", levels, cap);
+				CheckWindowLayout("window land colour" + suffix, ColourSignature(),
+					Tessellation::Mode::kLandscape);
+				CheckWindowLayout("window land depth" + suffix, DepthPrepassSignature(),
+					Tessellation::Mode::kLandscape);
+				CheckWindowLayout("window blood colour" + suffix, ColourSignature(),
+					Tessellation::Mode::kBloodDecal);
+				CheckWindowLayout("window blood depth" + suffix, DepthPrepassSignature(),
+					Tessellation::Mode::kBloodDecal);
+				CheckWindowLayout("window mesh raise" + suffix, ColourSignature(),
+					Tessellation::Mode::kMeshRaise);
+			}
+		}
+		Settings::enableMeshRaise = false;
+		Settings::meshRaiseHeight = 0.0f;
+		Settings::clipmapLevels = 2;
+		Settings::tessellationScreenCap = true;
+
+		std::printf("\nColour and depth prepass must build bit-identical factors\n");
+		// off, shipped (every switch but the screen cap), and all on.
+		for (const std::string_view savings : { "off", "shipped", "on" }) {
+			const bool on = savings != "off";
+			for (const bool blend : { false, true }) {
+				for (const uint32_t levels : { 1u, 2u }) {
+					SetSavings(on, savings == "on", on ? 0.015625f : 0.0f, on);
+					Settings::terrainBlendingCompatibility = blend;
+					Settings::clipmapLevels = levels;
+					CheckSameFactors(std::format("factors savings={} tb={} levels={}", savings,
+						blend ? 1 : 0, levels));
+				}
+			}
+		}
+		SetSavings(defaultCull, defaultCap, defaultSnap, defaultCanonical);
+		Settings::terrainBlendingCompatibility = false;
+		Settings::clipmapLevels = 2;
+
+		Settings::enableSnowRaise = false;
+		Settings::snowRaiseHeight = 0.0f;
+	}
+
+	CheckLegacyText();
 
 	CheckAsyncCompiler();
 
