@@ -13,6 +13,7 @@
 #include "SurfaceProfiles.h"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <vector>
 
@@ -43,6 +44,12 @@ namespace SnowCoverage
 
 		uint32_t g_cursor{ 0 };
 
+		// One bit per texel, set for every texel that is not filled for the current window, so
+		// the sweep can jump over filled texels instead of visiting all of them.
+		std::vector<uint64_t> g_queued;
+		int32_t               g_queuedBaseX{ 0 };
+		int32_t               g_queuedBaseY{ 0 };
+
 		int32_t g_centreCellX{ 0 };
 		int32_t g_centreCellY{ 0 };
 
@@ -60,6 +67,52 @@ namespace SnowCoverage
 			g_failed = true;
 			Shutdown();
 			return false;
+		}
+
+		void SetBit(std::vector<uint64_t>& a_bits, uint32_t a_index)
+		{
+			a_bits[a_index >> 6] |= 1ull << (a_index & 63);
+		}
+
+		void ClearBit(std::vector<uint64_t>& a_bits, uint32_t a_index)
+		{
+			a_bits[a_index >> 6] &= ~(1ull << (a_index & 63));
+		}
+
+		// Texels from a_from, in ring order, before the next set bit, or a_limit when no bit is
+		// set within the next a_limit texels.
+		uint32_t Skip(const std::vector<uint64_t>& a_bits, uint32_t a_from, uint32_t a_limit)
+		{
+			uint32_t skipped = 0;
+			while (skipped < a_limit) {
+				const uint32_t index = (a_from + skipped) % (kTexels * kTexels);
+				const uint64_t word = a_bits[index >> 6] >> (index & 63);
+				if (word) {
+					return std::min(skipped + static_cast<uint32_t>(std::countr_zero(word)), a_limit);
+				}
+				skipped += 64 - (index & 63);
+			}
+			return a_limit;
+		}
+
+		// Moving the window base only changes the cell of the columns and rows it wraps, so
+		// only those texels go back into the queue.
+		void QueueMoved(int32_t a_baseX, int32_t a_baseY)
+		{
+			const auto queueLines = [](int32_t a_from, int32_t a_to, bool a_rows) {
+				const int32_t first = std::min(a_from, a_to);
+				const int32_t lines = std::min(std::abs(a_to - a_from), static_cast<int32_t>(kTexels));
+				for (int32_t k = 0; k < lines; ++k) {
+					const uint32_t line = static_cast<uint32_t>(first + k) & kMask;
+					for (uint32_t i = 0; i < kTexels; ++i) {
+						SetBit(g_queued, a_rows ? line * kTexels + i : i * kTexels + line);
+					}
+				}
+			};
+			queueLines(g_queuedBaseX, a_baseX, false);
+			queueLines(g_queuedBaseY, a_baseY, true);
+			g_queuedBaseX = a_baseX;
+			g_queuedBaseY = a_baseY;
 		}
 	}
 
@@ -88,6 +141,7 @@ namespace SnowCoverage
 
 		g_filledX.assign(g_coverage.size(), -0x40000000);
 		g_filledY.assign(g_coverage.size(), -0x40000000);
+		g_queued.assign(g_coverage.size() / 64, ~0ull);
 
 		D3D11_TEXTURE2D_DESC desc{};
 		desc.Width = kTexels;
@@ -144,6 +198,7 @@ namespace SnowCoverage
 	{
 		std::fill(g_filledX.begin(), g_filledX.end(), -0x40000000);
 		std::fill(g_filledY.begin(), g_filledY.end(), -0x40000000);
+		std::fill(g_queued.begin(), g_queued.end(), ~0ull);
 		g_cursor = 0;
 		g_everFilled = false;
 		g_reportedComplete = false;
@@ -246,6 +301,8 @@ namespace SnowCoverage
 		const int32_t baseX = g_centreCellX - static_cast<int32_t>(kTexels / 2);
 		const int32_t baseY = g_centreCellY - static_cast<int32_t>(kTexels / 2);
 
+		QueueMoved(baseX, baseY);
+
 		const uint32_t shelterRevision = Shelter::Revision();
 		const bool     shelterMoved = shelterRevision != g_shelterRevision;
 		const bool     settledHere = g_settledValid &&
@@ -267,6 +324,15 @@ namespace SnowCoverage
 		const bool sweep = !settledHere || g_dirty;
 
 		while (sweep && queries < budget && scanned < total) {
+			// Texels that are not queued are filled and would only be skipped below.
+			if (const uint32_t skip = Skip(g_queued, g_cursor, total - scanned)) {
+				g_cursor = (g_cursor + skip) % total;
+				scanned += skip;
+				if (scanned >= total) {
+					break;
+				}
+			}
+
 			const uint32_t index = g_cursor;
 			g_cursor = (g_cursor + 1) % total;
 			++scanned;
@@ -280,6 +346,7 @@ namespace SnowCoverage
 				baseY + static_cast<int32_t>((ty - static_cast<uint32_t>(baseY)) & kMask);
 
 			if (g_filledX[index] == cellX && g_filledY[index] == cellY) {
+				ClearBit(g_queued, index);
 				continue;
 			}
 
@@ -302,6 +369,7 @@ namespace SnowCoverage
 			g_coverage[index] = ground.type == Surfaces::Type::kSnow ? 255 : 0;
 			g_filledX[index] = cellX;
 			g_filledY[index] = cellY;
+			ClearBit(g_queued, index);
 			g_dirty = true;
 		}
 

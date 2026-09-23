@@ -12,6 +12,7 @@
 #include "ShelterTransition.h"
 
 #include <algorithm>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <vector>
@@ -47,6 +48,15 @@ namespace Shelter
 		uint32_t g_cursor{ 0 };
 		uint32_t g_ageCursor{ 0 };
 
+		// One bit per texel. Every texel that is not filled for the current window is either
+		// queued (the scan still has to probe it) or a hole (its land probe failed and it waits
+		// for budget the scan did not need), so the scan can jump over filled texels.
+		std::vector<uint64_t> g_queued;
+		std::vector<uint64_t> g_holes;
+		uint32_t              g_holeCursor{ 0 };
+		int32_t               g_queuedBaseX{ 0 };
+		int32_t               g_queuedBaseY{ 0 };
+
 		int32_t  g_centreCellX{ 0 };
 		int32_t  g_centreCellY{ 0 };
 		bool     g_dirty{ false };
@@ -73,7 +83,57 @@ namespace Shelter
 			g_rowSums.assign(total, 0);
 			g_filledX.assign(total, -0x40000000);
 			g_filledY.assign(total, -0x40000000);
+			g_queued.assign(total / 64, ~0ull);
+			g_holes.assign(total / 64, 0);
 			g_allocated = true;
+		}
+
+		void SetBit(std::vector<uint64_t>& a_bits, uint32_t a_index)
+		{
+			a_bits[a_index >> 6] |= 1ull << (a_index & 63);
+		}
+
+		void ClearBit(std::vector<uint64_t>& a_bits, uint32_t a_index)
+		{
+			a_bits[a_index >> 6] &= ~(1ull << (a_index & 63));
+		}
+
+		// Texels from a_from, in ring order, before the next set bit, or a_limit when no bit is
+		// set within the next a_limit texels.
+		uint32_t Skip(const std::vector<uint64_t>& a_bits, uint32_t a_from, uint32_t a_limit)
+		{
+			uint32_t skipped = 0;
+			while (skipped < a_limit) {
+				const uint32_t index = (a_from + skipped) % (kTexels * kTexels);
+				const uint64_t word = a_bits[index >> 6] >> (index & 63);
+				if (word) {
+					return std::min(skipped + static_cast<uint32_t>(std::countr_zero(word)), a_limit);
+				}
+				skipped += 64 - (index & 63);
+			}
+			return a_limit;
+		}
+
+		// Moving the window base only changes the cell of the columns and rows it wraps, so
+		// only those texels go back into the queue.
+		void QueueMoved(int32_t a_baseX, int32_t a_baseY)
+		{
+			const auto queueLines = [](int32_t a_from, int32_t a_to, bool a_rows) {
+				const int32_t first = std::min(a_from, a_to);
+				const int32_t lines = std::min(std::abs(a_to - a_from), static_cast<int32_t>(kTexels));
+				for (int32_t k = 0; k < lines; ++k) {
+					const uint32_t line = static_cast<uint32_t>(first + k) & kMask;
+					for (uint32_t i = 0; i < kTexels; ++i) {
+						const uint32_t index = a_rows ? line * kTexels + i : i * kTexels + line;
+						SetBit(g_queued, index);
+						ClearBit(g_holes, index);
+					}
+				}
+			};
+			queueLines(g_queuedBaseX, a_baseX, false);
+			queueLines(g_queuedBaseY, a_baseY, true);
+			g_queuedBaseX = a_baseX;
+			g_queuedBaseY = a_baseY;
 		}
 
 		bool IsActorHit(const RE::hkpCollidable* a_collidable)
@@ -293,6 +353,8 @@ namespace Shelter
 		g_rowSums.clear();
 		g_filledX.clear();
 		g_filledY.clear();
+		g_queued.clear();
+		g_holes.clear();
 		g_allocated = false;
 		g_haveCentre = false;
 		g_dirty = false;
@@ -307,8 +369,11 @@ namespace Shelter
 
 		std::fill(g_filledX.begin(), g_filledX.end(), -0x40000000);
 		std::fill(g_filledY.begin(), g_filledY.end(), -0x40000000);
+		std::fill(g_queued.begin(), g_queued.end(), ~0ull);
+		std::fill(g_holes.begin(), g_holes.end(), 0ull);
 		g_cursor = 0;
 		g_ageCursor = 0;
+		g_holeCursor = 0;
 
 		std::fill(g_cap.begin(), g_cap.end(), static_cast<uint8_t>(255));
 		std::fill(g_raw.begin(), g_raw.end(), static_cast<uint8_t>(0));
@@ -430,9 +495,13 @@ namespace Shelter
 
 		const uint32_t total = static_cast<uint32_t>(g_raw.size());
 
+		QueueMoved(baseX, baseY);
+
 		const uint32_t aging = static_cast<uint32_t>(std::max(Settings::shelterRefresh, 0));
 		for (uint32_t i = 0; i < aging; ++i) {
 			g_filledX[g_ageCursor] = -0x40000000;
+			SetBit(g_queued, g_ageCursor);
+			ClearBit(g_holes, g_ageCursor);
 			g_ageCursor = (g_ageCursor + 1) % total;
 		}
 
@@ -443,10 +512,44 @@ namespace Shelter
 		uint32_t scanned = 0;
 
 		const uint32_t raysPerCell = Settings::shelterMeshCap && Ready() ? 2u : 1u;
-		while (rays + raysPerCell <= std::max(budget, raysPerCell) && scanned < total) {
+		const uint32_t limit = std::max(budget, raysPerCell);
+
+		// Once the queue is empty, the budget it did not need re-queues holes for one more lap,
+		// at most once a frame, so land that streams in late is still found without holding up
+		// texels that have land.
+		bool       retried = false;
+		const auto requeueHoles = [&]() {
+			if (retried) {
+				return false;
+			}
+			retried = true;
+			for (uint32_t spare = (limit - rays) / raysPerCell; spare > 0; --spare) {
+				const uint32_t skip = Skip(g_holes, g_holeCursor, total);
+				if (skip >= total) {
+					break;
+				}
+				const uint32_t index = (g_holeCursor + skip) % total;
+				ClearBit(g_holes, index);
+				SetBit(g_queued, index);
+				g_holeCursor = (index + 1) % total;
+				scanned = 0;
+			}
+			return scanned < total;
+		};
+
+		while (rays + raysPerCell <= limit && (scanned < total || requeueHoles())) {
+			if (const uint32_t skip = Skip(g_queued, g_cursor, total - scanned)) {
+				g_cursor = (g_cursor + skip) % total;
+				scanned += skip;
+				if (scanned >= total) {
+					continue;
+				}
+			}
+
 			const uint32_t index = g_cursor;
 			g_cursor = (g_cursor + 1) % total;
 			++scanned;
+			ClearBit(g_queued, index);
 
 			const uint32_t tx = index & kMask;
 			const uint32_t ty = index / kTexels;
@@ -468,7 +571,9 @@ namespace Shelter
 
 			float landZ = 0.0f;
 			if (!tes->GetLandHeight(probe, landZ)) {
-
+				// A failed probe still costs no budget, but the texel is not probed again every
+				// frame: it stays unfilled and waits in g_holes to be retried.
+				SetBit(g_holes, index);
 				continue;
 			}
 
