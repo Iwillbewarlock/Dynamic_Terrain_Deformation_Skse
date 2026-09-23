@@ -543,11 +543,13 @@ namespace Clipmap
 						const bool  isFoot =
 							std::abs(side) >= Settings::stampFootSeparation;
 
-						float reportLand = 0.0f;
-						if (tes) {
-							tes->GetLandHeight(centre, reportLand);
+						if (Settings::logStampFeet) {
+							float reportLand = 0.0f;
+							if (tes) {
+								tes->GetLandHeight(centre, reportLand);
+							}
+							LogFootShape(side, radius, centre.z, reportLand, isFoot);
 						}
-						LogFootShape(side, radius, centre.z, reportLand, isFoot);
 
 						if (isFoot) {
 

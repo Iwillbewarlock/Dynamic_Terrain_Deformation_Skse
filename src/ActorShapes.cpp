@@ -26,10 +26,6 @@ namespace ActorShapes
 			return false;
 		}
 
-		if (skyrim_cast<RE::hkpListShape*>(hkpRigid)) {
-			return false;
-		}
-
 		RE::hkVector4 massCentre;
 		rigid->GetCenterOfMassWorld(massCentre);
 
