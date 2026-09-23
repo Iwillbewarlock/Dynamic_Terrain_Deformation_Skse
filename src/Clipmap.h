@@ -40,6 +40,18 @@ namespace Clipmap
 	inline constexpr uint32_t kActivityRatio = kTexels / kActivityTexels;
 	static_assert(kTexels % kActivityTexels == 0);
 
+	// Level 1 keeps its activity in 48-unit cells too (16 of its texels), fine enough to tell
+	// single land patches in its ring apart.
+	inline constexpr uint32_t kActivityTexels1 = 128;
+	inline constexpr uint32_t kActivityRatio1 = kTexels / kActivityTexels1;
+	static_assert(kActivityRatio % 8 == 0 && kActivityRatio1 % 8 == 0,
+		"an activity cell must hold whole 8x8 update groups");
+
+	constexpr uint32_t ActivityTexelsFor(uint32_t a_level)
+	{
+		return a_level == 0 ? kActivityTexels : kActivityTexels1;
+	}
+
 	inline constexpr uint32_t kActivitySlot = 0;
 
 	inline constexpr uint32_t kLevel1Slot = 2;

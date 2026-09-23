@@ -72,6 +72,8 @@ namespace Clipmap
 			float stampBounds[kMaxStamps][4]{};
 
 			uint32_t noNoiseMask[4]{};
+
+			uint32_t activityShape[4]{};
 		};
 		static_assert(sizeof(ParamsCB) % 16 == 0);
 
@@ -254,8 +256,8 @@ namespace Clipmap
 			}
 
 			D3D11_TEXTURE2D_DESC activityDesc{};
-			activityDesc.Width = kActivityTexels;
-			activityDesc.Height = kActivityTexels;
+			activityDesc.Width = ActivityTexelsFor(a_level);
+			activityDesc.Height = ActivityTexelsFor(a_level);
 			activityDesc.MipLevels = 1;
 			activityDesc.ArraySize = 1;
 			activityDesc.Format = DXGI_FORMAT_R32_UINT;
@@ -264,7 +266,14 @@ namespace Clipmap
 			activityDesc.BindFlags =
 				D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
 
-			if (FAILED(a_device->CreateTexture2D(&activityDesc, nullptr, &g_activity[a_level]))) {
+			// Zero like the field, so it holds the field's max |h| from the start.
+			const std::vector<uint32_t> activityZeros(
+				static_cast<size_t>(activityDesc.Width) * activityDesc.Height, 0);
+			D3D11_SUBRESOURCE_DATA activityInitial{};
+			activityInitial.pSysMem = activityZeros.data();
+			activityInitial.SysMemPitch = activityDesc.Width * sizeof(uint32_t);
+
+			if (FAILED(a_device->CreateTexture2D(&activityDesc, &activityInitial, &g_activity[a_level]))) {
 				logger::error("Clipmap: CreateTexture2D (activity) failed for level {}", a_level);
 				return false;
 			}
@@ -1049,6 +1058,9 @@ namespace Clipmap
 				params.window[0] = std::floor(position.x / cell);
 				params.window[1] = std::floor(position.y / cell);
 				params.window[2] = cell;
+
+				params.activityShape[0] = (kTexels / ActivityTexelsFor(level)) / 8;
+				params.activityShape[1] = ActivityTexelsFor(level) - 1;
 
 				const bool  hasCoarser = (level + 1) < levels && g_srv[level + 1];
 				params.coarse[0] = hasCoarser ? 1.0f : 0.0f;

@@ -147,6 +147,9 @@ cbuffer Params : register(b0)
 	float4 StampBounds[MAX_STAMPS];
 
 	uint4 NoNoiseMask;
+
+	// x: update groups per activity cell on each axis, y: activity texels per axis - 1.
+	uint4 ActivityShape;
 };
 
 )"
@@ -587,12 +590,13 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID,
 
 	if (groupIndex == 0 && listed && gBlockMax != 0) {
 
-		const int2 centre = int2(gid.xy / kActivityGroups);
+		const int2 centre = int2(gid.xy / ActivityShape.x);
+		const int  wrap = (int)ActivityShape.y;
 		for (int dy = -1; dy <= 1; ++dy) {
 			for (int dx = -1; dx <= 1; ++dx) {
 
 				InterlockedMax(
-					Activity[uint2((centre + int2(dx, dy)) & kActivityWrap)], gBlockMax);
+					Activity[uint2((centre + int2(dx, dy)) & wrap)], gBlockMax);
 			}
 		}
 	}
@@ -609,10 +613,6 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID,
 				"static const float kPrintBandFallLo = {:.6f};\n"
 				"static const float kPrintBandFallHi = {:.6f};\n"
 
-				"static const uint2 kActivityGroups = uint2({}, {});\n"
-
-				"static const int2 kActivityWrap = int2({}, {});\n"
-
 				"static const float kCoverageWorldSize = {:.4f}f;\n"
 				"static const float kCoverageTexels    = {:.1f}f;\n"
 				"static const float kMeshCapWorldSize  = {:.4f}f;\n"
@@ -622,8 +622,6 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID,
 				"static const float kMeshCapFadeEnd    = {:.4f}f;\n",
 				kPrintCoreLo, kPrintCoreHi, kPrintBandRiseLo, kPrintBandRiseHi,
 				kPrintBandFallLo, kPrintBandFallHi,
-				kActivityRatio / 8, kActivityRatio / 8,
-				kActivityTexels - 1, kActivityTexels - 1,
 				SnowCoverage::kWorldSize, static_cast<float>(SnowCoverage::kTexels),
 				Shelter::kWorldSize, static_cast<float>(Shelter::kTexels),
 				Shelter::kWorldSize * 0.39f, Shelter::kWorldSize * 0.47f) +
@@ -657,6 +655,7 @@ cbuffer Params : register(b0)
 	float4 RaiseWindow;
 	float4 StampBounds[MAX_STAMPS];
 	uint4  NoNoiseMask;
+	uint4  ActivityShape;
 };
 
 Texture2D<uint> LiveBefore : register(t5);

@@ -5,8 +5,9 @@
 // one side by side on the GPU. Both get the same resources and the same seeded frames
 // (every stamp kind, window moves and jumps, both levels with coarse seeding, dt and
 // weather changes), and after every frame Field, DecayRate and Activity must match bit
-// for bit. The current shader runs as Clipmap::Update does, through the group lists
-// (ClipmapSkipIdleGroups), whose flags must also match its field. Walks over sparse
+// for bit (level 1's activity, now in finer cells, is checked against the field). The
+// current shader runs as Clipmap::Update does, through the group lists
+// (ClipmapSkipIdleGroups), whose flags and activity must also match its field. Walks over sparse
 // marks exercise the lists: idle frames, trails, jumps, reseeds and marks fading back
 // to zero, and deliberately broken lists must be caught. With repose on, the shipped
 // shaders read neighbours that other groups may already have written this frame, so the
@@ -70,6 +71,7 @@ namespace
 		float raiseWindow[4]{};
 		float stampBounds[kStamps][4]{};  // read only by the current shader
 		uint32_t noNoiseMask[4]{};        // read only by the current shader
+		uint32_t activityShape[4]{};      // read only by the current shader, set per level in Update
 	};
 	static_assert(sizeof(Params) % 16 == 0);
 
@@ -111,7 +113,8 @@ namespace
 		return Clipmap::UpdateShaderSource();
 	}
 
-	// The same generated constants in front of the ec04e21 shader body.
+	// The same generated constants in front of the ec04e21 shader body, plus the activity
+	// layout it took from them: level 0's on both levels.
 	std::string BaselineSource()
 	{
 		const std::string current = Clipmap::UpdateShaderSource();
@@ -119,7 +122,11 @@ namespace
 		Require(current.size() > body &&
 					current.compare(current.size() - body, body, Clipmap::kUpdateShader) == 0,
 			"UpdateShaderSource() no longer ends with kUpdateShader");
-		return current.substr(0, current.size() - body) + ClipmapBaseline::kUpdateShader;
+		return current.substr(0, current.size() - body) +
+		       std::format("static const uint2 kActivityGroups = uint2({0}, {0});\n"
+						   "static const int2 kActivityWrap = int2({1}, {1});\n",
+				   Clipmap::kActivityRatio / 8, Clipmap::kActivityTexels - 1) +
+		       ClipmapBaseline::kUpdateShader;
 	}
 
 	// Repose reads the four neighbours from the texture the pass is writing, so what a
@@ -205,12 +212,15 @@ namespace
 
 	// One shader with its own copy of both clipmap levels. The current shader also has
 	// its GROUP_LIST variant and the group list pass, and lists groups when skipIdle is set.
+	// It keeps level 1's activity in Clipmap::ActivityTexelsFor(1) cells (fineActivity1);
+	// ec04e21 kept both levels at level 0's size.
 	struct Side
 	{
 		ComPtr<ID3D11ComputeShader>      shader;
 		ComPtr<ID3D11ComputeShader>      listedShader;
 		ComPtr<ID3D11ComputeShader>      groupList;
 		bool                             skipIdle{ false };
+		bool                             fineActivity1{ false };
 		Level                            level[kLevels];
 		ComPtr<ID3D11Texture2D>          before;
 		ComPtr<ID3D11ShaderResourceView> beforeSRV;
@@ -266,6 +276,7 @@ namespace
 			_readField = Staging(kTexels, DXGI_FORMAT_R32_FLOAT);
 			_readDecay = Staging(kTexels, DXGI_FORMAT_R8G8_UNORM);
 			_readActivity = Staging(kActivity, DXGI_FORMAT_R32_UINT);
+			_readActivity1 = Staging(Clipmap::kActivityTexels1, DXGI_FORMAT_R32_UINT);
 			_readLive = Staging(kGroups, DXGI_FORMAT_R32_UINT);
 
 			// The group list buffers, shared by the levels, as CreateGroupList in Clipmap.cpp.
@@ -330,6 +341,7 @@ namespace
 			create(a_listed, a_side.listedShader);
 			create(a_groupList, a_side.groupList);
 			a_side.skipIdle = a_skipIdle;
+			a_side.fineActivity1 = a_groupList != nullptr;  // the current shader
 
 			// Formats and bind flags as in CreateLevel in Clipmap.cpp.
 			D3D11_TEXTURE2D_DESC desc{};
@@ -341,6 +353,7 @@ namespace
 			desc.Usage = D3D11_USAGE_DEFAULT;
 			desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
 			for (auto& level : a_side.level) {
+				const auto index = static_cast<uint32_t>(&level - a_side.level);
 				desc.Width = desc.Height = kTexels;
 				desc.Format = DXGI_FORMAT_R32_FLOAT;
 				Check(_device->CreateTexture2D(&desc, nullptr, &level.field), "field");
@@ -350,7 +363,7 @@ namespace
 				Check(_device->CreateTexture2D(&desc, nullptr, &level.decay), "decay");
 				Check(_device->CreateUnorderedAccessView(level.decay.Get(), nullptr, &level.decayUAV), "decay UAV");
 				Check(_device->CreateShaderResourceView(level.decay.Get(), nullptr, &level.decaySRV), "decay SRV");
-				desc.Width = desc.Height = kActivity;
+				desc.Width = desc.Height = a_side.fineActivity1 ? Clipmap::ActivityTexelsFor(index) : kActivity;
 				desc.Format = DXGI_FORMAT_R32_UINT;
 				Check(_device->CreateTexture2D(&desc, nullptr, &level.activity), "activity");
 				Check(_device->CreateUnorderedAccessView(level.activity.Get(), nullptr, &level.activityUAV),
@@ -422,9 +435,14 @@ namespace
 				};
 				_context->CSSetShaderResources(1, 2, seeds);
 
+				// The activity layout, as Clipmap::Update sets it per level.
+				Params params = a_levels[level];
+				params.activityShape[0] = kTexels / Clipmap::ActivityTexelsFor(level) / 8;
+				params.activityShape[1] = Clipmap::ActivityTexelsFor(level) - 1;
+
 				D3D11_MAPPED_SUBRESOURCE mapped{};
 				Check(_context->Map(_params.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped), "Map params");
-				std::memcpy(mapped.pData, &a_levels[level], sizeof(Params));
+				std::memcpy(mapped.pData, &params, sizeof(Params));
 				_context->Unmap(_params.Get(), 0);
 
 				const UINT zero[4] = { 0, 0, 0, 0 };
@@ -529,6 +547,7 @@ namespace
 			ID3D11Texture2D* staging = desc.Format == DXGI_FORMAT_R32_FLOAT ? _readField.Get() :
 			                           desc.Format == DXGI_FORMAT_R8G8_UNORM ? _readDecay.Get() :
 			                           desc.Width == kActivity               ? _readActivity.Get() :
+			                           desc.Width == Clipmap::kActivityTexels1 ? _readActivity1.Get() :
 			                                                                   _readLive.Get();
 			const UINT rowBytes = desc.Width * (desc.Format == DXGI_FORMAT_R8G8_UNORM ? 2 : 4);
 
@@ -588,6 +607,7 @@ namespace
 		ComPtr<ID3D11Texture2D>          _readField;
 		ComPtr<ID3D11Texture2D>          _readDecay;
 		ComPtr<ID3D11Texture2D>          _readActivity;
+		ComPtr<ID3D11Texture2D>          _readActivity1;
 		ComPtr<ID3D11Texture2D>          _readLive;
 		ComPtr<ID3D11Buffer>             _list;
 		ComPtr<ID3D11UnorderedAccessView> _listUAV;
@@ -1130,9 +1150,56 @@ namespace
 			};
 			add(total.field, a_one.level[level].field.Get(), a_two.level[level].field.Get(), 4, true);
 			add(total.decay, a_one.level[level].decay.Get(), a_two.level[level].decay.Get(), 2, false);
-			add(total.activity, a_one.level[level].activity.Get(), a_two.level[level].activity.Get(), 4, false);
+			// Level 1's activity differs in layout between ec04e21 and the current shader;
+			// WrongActivity checks the current one against its field instead.
+			if (level == 0 || a_one.fineActivity1 == a_two.fineActivity1) {
+				add(total.activity, a_one.level[level].activity.Get(), a_two.level[level].activity.Get(), 4, false);
+			}
 		}
 		return total;
+	}
+
+	// Activity must hold, per cell, the max |h| (as bits) over the texels of that cell and
+	// the eight around it, of the field the update just wrote: the flat-patch rule
+	// (TessellationSkipFlat) reads a zero as proof of a zero field. Returns how many
+	// activity texels disagree, over both levels.
+	size_t WrongActivity(Gpu& a_gpu, Side& a_side)
+	{
+		static std::vector<uint8_t> field;
+		static std::vector<uint8_t> activity;
+		size_t                      wrong = 0;
+		for (uint32_t index = 0; index < kLevels; ++index) {
+			auto&          level = a_side.level[index];
+			const uint32_t cells = a_side.fineActivity1 ? Clipmap::ActivityTexelsFor(index) : kActivity;
+			const uint32_t ratio = kTexels / cells;
+			a_gpu.Read(level.field.Get(), field);
+			a_gpu.Read(level.activity.Get(), activity);
+
+			std::vector<uint32_t> block(static_cast<size_t>(cells) * cells, 0);
+			for (UINT y = 0; y < kTexels; ++y) {
+				for (UINT x = 0; x < kTexels; ++x) {
+					uint32_t bits = 0;
+					std::memcpy(&bits, field.data() + (static_cast<size_t>(y) * kTexels + x) * 4, 4);
+					auto& cell = block[static_cast<size_t>(y / ratio) * cells + x / ratio];
+					cell = std::max(cell, bits & 0x7FFFFFFFu);
+				}
+			}
+			for (uint32_t y = 0; y < cells; ++y) {
+				for (uint32_t x = 0; x < cells; ++x) {
+					uint32_t expected = 0;
+					for (uint32_t dy = 0; dy < 3; ++dy) {
+						for (uint32_t dx = 0; dx < 3; ++dx) {
+							expected = std::max(expected,
+								block[static_cast<size_t>((y + dy + cells - 1) % cells) * cells + (x + dx + cells - 1) % cells]);
+						}
+					}
+					uint32_t actual = 0;
+					std::memcpy(&actual, activity.data() + (static_cast<size_t>(y) * cells + x) * 4, 4);
+					wrong += actual != expected;
+				}
+			}
+		}
+		return wrong;
 	}
 
 	// The flags a side with group lists wrote last must be 1 exactly for the groups that
@@ -1214,6 +1281,9 @@ namespace
 				const size_t wrong = a_broken ? 0 : WrongFlags(a_gpu, a_two);
 				Require(wrong == 0, std::string(a_name) + ": frame " + std::to_string(frame) + ", " +
 										std::to_string(wrong) + " group flags do not match the field");
+				const size_t wrongActivity = a_broken ? 0 : WrongActivity(a_gpu, a_two);
+				Require(wrongActivity == 0, std::string(a_name) + ": frame " + std::to_string(frame) + ", " +
+												std::to_string(wrongActivity) + " activity cells do not match the field");
 			}
 			const auto d = CompareSides(a_gpu, a_one, a_two);
 			if (d.Any()) {
@@ -1255,7 +1325,7 @@ namespace
 					level, listed, lists.fullFrames[level], listed ? 100.0 * lists.share[level] / listed : 0.0,
 					listed ? 100.0 * lists.minShare[level] : 0.0);
 			}
-			std::printf(" flags matched the field every frame\n");
+			std::printf(" flags and activity matched the field every frame\n");
 		}
 		return differing;
 	}
