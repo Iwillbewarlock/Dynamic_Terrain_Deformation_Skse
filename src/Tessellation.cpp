@@ -52,6 +52,12 @@ namespace Tessellation
 			return Settings::tessellationFrustumCull;
 		}
 
+		bool ScreenCapEmitted()
+		{
+			// Needs the per-frame Screen value, which rides in the clipmap window buffer.
+			return Settings::tessellationScreenCap && Settings::useClipmap;
+		}
+
 		bool FactorSnapEmitted()
 		{
 			return Settings::tessellationFactorSnap > 0.0f;
@@ -59,12 +65,12 @@ namespace Tessellation
 
 		bool EdgeWrapperEmitted()
 		{
-			return Settings::tessellationCanonicalEdges || FactorSnapEmitted();
+			return Settings::tessellationCanonicalEdges || ScreenCapEmitted() || FactorSnapEmitted();
 		}
 
-		// Bound on |rise| that the hull cull assumes and the domain shader enforces: the
-		// field (INI bound), the constant and debug lifts, and the snow raise
-		// (Weather::RaiseScale is at most 1).
+		// Bound on |rise| that the hull cull and the screen cap assume, and that the domain
+		// shader enforces while the cull is on: the field (INI bound), the constant and debug
+		// lifts, and the snow raise (Weather::RaiseScale is at most 1).
 		float DisplaceBound()
 		{
 			const bool raising = Settings::enableSnowRaise && Settings::useClipmap &&
@@ -173,6 +179,9 @@ namespace Tessellation
 
 					const bool coarse = Clipmap::LevelCount() > 1;
 
+					// Screen sits at c3 to match the C++ WindowCB, whose window1 slot always exists.
+					const bool screen = field && ScreenCapEmitted();
+
 					out += std::format(
 						"Texture2D<float> ClipmapHeight : register(t0);\n"
 						"SamplerState     ClipmapSampler : register(s0);\n\n"
@@ -183,12 +192,17 @@ namespace Tessellation
 						"\t\n"
 						"\tfloat4 Raise;\n"
 						"{}"
+						"{}"
 						"}};\n\n"
 						"static const float kClipmapWorldSize = {:.4f}f;\n\n",
 						Clipmap::kParamsSlot,
 						coarse ? "\t\n"
 								 "\tfloat4 Window1;\n" :
 								 "",
+						!screen ? "" :
+						coarse  ? "\tfloat4 Screen;\n" :
+								  "\tfloat4 WindowReserved;\n"
+								  "\tfloat4 Screen;\n",
 						Clipmap::kWorldSize);
 
 					if (coarse) {
@@ -397,9 +411,11 @@ namespace Tessellation
 				return out;
 			}
 
-			if (FrustumCullEmitted()) {
+			if (FrustumCullEmitted() || ScreenCapEmitted()) {
 				out += std::format("static const float kDisplaceBound = {:.4f}f;\n\n", DisplaceBound());
+			}
 
+			if (FrustumCullEmitted()) {
 				out +=
 					"float4 FrustumSides(float4 c)\n"
 					"{\n"
@@ -503,6 +519,28 @@ namespace Tessellation
 				;
 			}
 
+			if (ScreenCapEmitted()) {
+				out +=
+					"float ScreenCap(float3 a, float3 b, float wa, float wb)\n"
+					"{\n"
+					"\t// Screen.x = internal viewport height / 2 / TessellationScreenPixels, written once\n"
+					"\t// a frame before the depth prepass. 0 (no measurement yet) leaves factors alone.\n"
+					"\tif (Screen.x <= 0.0f) {\n"
+					"\t\treturn kMaxTess;\n"
+					"\t}\n\n"
+					"\tconst float edge  = length(b - a);\n"
+					"\tconst float depth = (wa + wb) * 0.5f;   // clip w = view depth, untouched by jitter\n\n"
+					"\t// Anything that can reach the camera plane keeps its factor.\n"
+					"\tif (depth - (edge * 0.5f + kDisplaceBound) <= 0.0f) {\n"
+					"\t\treturn kMaxTess;\n"
+					"\t}\n\n"
+					"\t// Row 1 of the view-projection is P11 * view-up + jitter * view-forward, so its\n"
+					"\t// length is the vertical projection scale to ~1e-7 and follows zoom.\n"
+					"\tconst float scale = length(CameraViewProj[1].xyz);\n"
+					"\treturn clamp(edge * scale * Screen.x / depth, 1.0f, kMaxTess);\n"
+					"}\n\n";
+			}
+
 			if (FactorSnapEmitted()) {
 				out += std::format("static const float kFactorSnap = {:.6f}f;\n\n",
 					Settings::tessellationFactorSnap);
@@ -510,7 +548,7 @@ namespace Tessellation
 
 			if (EdgeWrapperEmitted()) {
 				out +=
-					"float EdgeTess(float3 a, float3 b)\n"
+					"float EdgeTess(float3 a, float3 b, float wa, float wb)\n"
 					"{\n";
 
 				if (Settings::tessellationCanonicalEdges) {
@@ -519,15 +557,23 @@ namespace Tessellation
 						"\t// every per-edge term (EdgeBound's lerp samples included) bit-identical.\n"
 						"\tconst bool swap = a.x > b.x ||\n"
 						"\t\t(a.x == b.x && (a.y > b.y || (a.y == b.y && a.z > b.z)));\n"
-						"\tconst float3 lo = swap ? b : a;\n"
-						"\tconst float3 hi = swap ? a : b;\n\n";
+						"\tconst float3 lo  = swap ? b : a;\n"
+						"\tconst float3 hi  = swap ? a : b;\n"
+						"\tconst float  wlo = swap ? wb : wa;\n"
+						"\tconst float  whi = swap ? wa : wb;\n\n";
 				} else {
 					out +=
-						"\tconst float3 lo = a;\n"
-						"\tconst float3 hi = b;\n\n";
+						"\tconst float3 lo  = a;\n"
+						"\tconst float3 hi  = b;\n"
+						"\tconst float  wlo = wa;\n"
+						"\tconst float  whi = wb;\n\n";
 				}
 
 				out += "\tfloat factor = EdgeFactor(lo, hi);\n";
+
+				if (ScreenCapEmitted()) {
+					out += "\tfactor = min(factor, ScreenCap(lo, hi, wlo, whi));\n";
+				}
 
 				if (FactorSnapEmitted()) {
 					out +=
@@ -563,9 +609,9 @@ namespace Tessellation
 				"\tconst float3 p2 = ReconstructWorld(patch[2].f0);\n\n";
 
 			out += EdgeWrapperEmitted() ?
-				"\to.edges[0] = EdgeTess(p1, p2);\n"
-				"\to.edges[1] = EdgeTess(p2, p0);\n"
-				"\to.edges[2] = EdgeTess(p0, p1);\n" :
+				"\to.edges[0] = EdgeTess(p1, p2, patch[1].f0.w, patch[2].f0.w);\n"
+				"\to.edges[1] = EdgeTess(p2, p0, patch[2].f0.w, patch[0].f0.w);\n"
+				"\to.edges[2] = EdgeTess(p0, p1, patch[0].f0.w, patch[1].f0.w);\n" :
 				"\to.edges[0] = EdgeFactor(p1, p2);\n"
 				"\to.edges[1] = EdgeFactor(p2, p0);\n"
 				"\to.edges[2] = EdgeFactor(p0, p1);\n";
@@ -1209,6 +1255,23 @@ namespace Tessellation
 
 		Mode g_activeMode{ Mode::kLandscape };
 
+		// Tallest viewport a routed landscape draw was rasterised with, this frame and the last
+		// complete one. Under DLSS/FSR/dynamic resolution this is the internal render height.
+		float    g_viewportHeightFrame{ 0.0f };
+		float    g_viewportHeight{ 0.0f };
+		float    g_viewportHeightLogged{ 0.0f };
+		uint32_t g_viewportLogs{ 0 };
+
+		void CaptureViewport(ID3D11DeviceContext* a_context)
+		{
+			D3D11_VIEWPORT viewports[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
+			UINT count = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+			a_context->RSGetViewports(&count, viewports);
+			if (count > 0 && viewports[0].Height > g_viewportHeightFrame) {
+				g_viewportHeightFrame = viewports[0].Height;
+			}
+		}
+
 		void ReleaseSaved()
 		{
 			if (g_saved.hs) {
@@ -1356,6 +1419,12 @@ namespace Tessellation
 
 		auto* context = globals::d3d::context;
 
+		// EndDraw runs from RestoreGeometry, after the engine flushed its state and drew, so
+		// this is the viewport the draw actually used (BeginDraw can still see a stale one).
+		if (g_activeMode == Mode::kLandscape && Settings::tessellationScreenCap) {
+			CaptureViewport(context);
+		}
+
 		if (g_activeMode == Mode::kLandscape) { TerrainBlendDiagnostics::End(context); }
 		g_culling.End(context);
 		if (g_biasActive) {
@@ -1423,6 +1492,30 @@ namespace Tessellation
 			if (!reported) { reported = true; logger::info("Terrain culling test: no-cull terrain request changed to back-face culling"); }
 		}
 		return selected;
+	}
+
+	float ScreenScale()
+	{
+		// Called once a frame from Clipmap::Update (Main_RenderDepth, before the depth prepass),
+		// so every routed draw of a frame reads the same value. Uses last frame's viewports.
+		if (g_viewportHeightFrame > 0.0f) {
+			g_viewportHeight = g_viewportHeightFrame;
+			g_viewportHeightFrame = 0.0f;
+		}
+
+		if (!Settings::tessellationScreenCap || !(g_viewportHeight >= 1.0f)) {
+			return 0.0f;
+		}
+
+		if (std::fabs(g_viewportHeight - g_viewportHeightLogged) >= 1.0f && g_viewportLogs < 16) {
+			++g_viewportLogs;
+			g_viewportHeightLogged = g_viewportHeight;
+			logger::info("Screen cap: internal viewport height {:.0f}, target {:.1f} px per "
+						 "generated edge",
+				g_viewportHeight, Settings::tessellationScreenPixels);
+		}
+
+		return 0.5f * g_viewportHeight / Settings::tessellationScreenPixels;
 	}
 
 	bool WantsDisplacement(Mode a_mode)

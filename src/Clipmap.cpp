@@ -19,10 +19,12 @@
 #include "StampShapes.h"
 #include "SurfaceProfiles.h"
 #include "SurfaceTypes.h"
+#include "Tessellation.h"
 #include "Weather.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <unordered_map>
 #include <string>
 #include <vector>
@@ -39,8 +41,13 @@ namespace Clipmap
 			float raise[4]{};
 
 			float window1[4]{};
+
+			// x = internal viewport height / 2 / TessellationScreenPixels (0 = cap off or not
+			// measured yet).
+			float screen[4]{};
 		};
 		static_assert(sizeof(WindowCB) % 16 == 0);
+		static_assert(offsetof(WindowCB, screen) == 48, "the generated ClipmapWindow reads Screen at c3");
 
 		struct ParamsCB
 		{
@@ -840,6 +847,7 @@ namespace Clipmap
 			}
 
 			window.raise[0] = Weather::RaiseScale();
+			window.screen[0] = Tessellation::ScreenScale();
 
 			{
 				const bool floored = Settings::snowGroundFloor && Settings::enableSnowRaise &&

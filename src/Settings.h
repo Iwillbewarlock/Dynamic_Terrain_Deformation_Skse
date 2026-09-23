@@ -143,6 +143,12 @@ namespace Settings
 
 	inline float tessellationDisplaceBound{ 256.0f };
 
+	// Off by default: it coarsens trail edges a few metres out at low internal resolutions, and
+	// the steps follow the view depth, so print rims can shimmer while walking or turning.
+	inline bool tessellationScreenCap{ false };
+
+	inline float tessellationScreenPixels{ 4.0f };
+
 	inline float tessellationFactorSnap{ 0.015625f };
 
 	inline bool tessellationCanonicalEdges{ true };

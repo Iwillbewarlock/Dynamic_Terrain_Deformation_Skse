@@ -267,6 +267,11 @@ namespace Settings
 		} else if (key == "TessellationDisplaceBound") {
 			tessellationDisplaceBound =
 				Clamped(key, AsFloat(key, value, 256.0f), 128.0f, 8192.0f);
+		} else if (key == "TessellationScreenCap") {
+			tessellationScreenCap = AsBool(value);
+		} else if (key == "TessellationScreenPixels") {
+			tessellationScreenPixels =
+				Clamped(key, AsFloat(key, value, 4.0f), 0.5f, 64.0f);
 		} else if (key == "TessellationFactorSnap") {
 			tessellationFactorSnap =
 				Clamped(key, AsFloat(key, value, 0.015625f), 0.0f, 0.25f);
@@ -828,10 +833,10 @@ namespace Settings
 			enableTessellationBounds, tessellationBlanketSpacing, tessellationRaiseSpacing,
 			tessellationTargetSpacing, tessellationMaxFactor);
 
-		logger::info("Hull savings: frustum cull={} (displace bound {}) | factor snap={} | "
-					 "canonical edges={}; hull cull v1",
-			tessellationFrustumCull, tessellationDisplaceBound, tessellationFactorSnap,
-			tessellationCanonicalEdges);
+		logger::info("Hull savings: frustum cull={} (displace bound {}) | screen cap={} ({} px per "
+					 "generated edge) | factor snap={} | canonical edges={}; hull cull v1",
+			tessellationFrustumCull, tessellationDisplaceBound, tessellationScreenCap,
+			tessellationScreenPixels, tessellationFactorSnap, tessellationCanonicalEdges);
 
 		logger::info("Snow raise: enabled={} | height={} | weather={} | distance={} "
 					 "fade={} | coverage budget={}/frame",

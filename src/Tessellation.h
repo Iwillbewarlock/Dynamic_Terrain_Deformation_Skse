@@ -62,4 +62,8 @@ namespace Tessellation
 
 	void Reset();
 	void PrepareFrame();
+
+	// Per-frame value for the screen-space cap (ClipmapWindow.Screen.x): internal viewport
+	// height / 2 / TessellationScreenPixels, or 0 while the cap is off or unmeasured.
+	float ScreenScale();
 }
