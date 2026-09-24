@@ -391,10 +391,34 @@ namespace SnowCoverage
 		}
 	}
 
+	bool Mapped()
+	{
+		return Settings::enableSnowRaise && g_everFilled && !g_upload.empty();
+	}
+
+	bool NoSnowNear(int32_t a_cellX, int32_t a_cellY, int32_t a_radius)
+	{
+		// A wider square would wrap onto its own texels.
+		if (g_coverage.empty() || a_radius < 0 || a_radius >= static_cast<int32_t>(kTexels / 2)) {
+			return false;
+		}
+
+		for (int32_t cellY = a_cellY - a_radius; cellY <= a_cellY + a_radius; ++cellY) {
+			const size_t row = static_cast<size_t>(static_cast<uint32_t>(cellY) & kMask) * kTexels;
+			for (int32_t cellX = a_cellX - a_radius; cellX <= a_cellX + a_radius; ++cellX) {
+				const size_t index = row + (static_cast<uint32_t>(cellX) & kMask);
+				if (g_filledX[index] != cellX || g_filledY[index] != cellY || g_coverage[index] != 0) {
+					return false;
+				}
+			}
+		}
+		return true;
+	}
+
 	float At(float a_worldX, float a_worldY)
 	{
 
-		if (!Settings::enableSnowRaise || !g_everFilled || g_upload.empty()) {
+		if (!Mapped()) {
 			return 1.0f;
 		}
 

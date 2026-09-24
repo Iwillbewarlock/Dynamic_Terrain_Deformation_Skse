@@ -28,6 +28,13 @@ namespace SnowCoverage
 
 	float At(float a_worldX, float a_worldY);
 
+	// Whether At reads the map. Until then it returns 1 everywhere.
+	bool Mapped();
+
+	// Whether every cell within a_radius cells (on both axes) of cell (a_cellX, a_cellY) has
+	// been probed and has no snow. A cell not probed yet may still turn out to have snow.
+	bool NoSnowNear(int32_t a_cellX, int32_t a_cellY, int32_t a_radius);
+
 	void BindDomain(ID3D11DeviceContext* a_context);
 	void UnbindDomain(ID3D11DeviceContext* a_context);
 

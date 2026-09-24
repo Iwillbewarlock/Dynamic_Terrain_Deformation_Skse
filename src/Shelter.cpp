@@ -11,6 +11,7 @@
 #include "Profiler.h"
 #include "Settings.h"
 #include "ShelterTransition.h"
+#include "SnowCoverage.h"
 
 #include <algorithm>
 #include <bit>
@@ -25,6 +26,9 @@ namespace Shelter
 		constexpr uint32_t kMask = kTexels - 1;
 		static_assert((kTexels & kMask) == 0, "kTexels must be a power of two for the "
 											  "toroidal index to be a bitmask");
+
+		// The widest reach a refresh asks SnowCoverage about: at most 17 x 17 coverage texels.
+		constexpr int32_t kMaxSnowReach = 8;
 
 		std::vector<uint8_t> g_raw;
 
@@ -57,6 +61,9 @@ namespace Shelter
 		// for budget the scan did not need), so the scan can jump over filled texels.
 		std::vector<uint64_t> g_queued;
 		std::vector<uint64_t> g_holes;
+		// One bit per texel the refresh queued again. Its fill record still names its cell, so
+		// while that holds, its targets come from an earlier probe of the same cell.
+		std::vector<uint64_t> g_refresh;
 		uint32_t              g_holeCursor{ 0 };
 		int32_t               g_queuedBaseX{ 0 };
 		int32_t               g_queuedBaseY{ 0 };
@@ -90,6 +97,7 @@ namespace Shelter
 			g_filledY.assign(total, -0x40000000);
 			g_queued.assign(total / 64, ~0ull);
 			g_holes.assign(total / 64, 0);
+			g_refresh.assign(total / 64, 0);
 			g_allocated = true;
 		}
 
@@ -101,6 +109,11 @@ namespace Shelter
 		void ClearBit(std::vector<uint64_t>& a_bits, uint32_t a_index)
 		{
 			a_bits[a_index >> 6] &= ~(1ull << (a_index & 63));
+		}
+
+		bool TestBit(const std::vector<uint64_t>& a_bits, uint32_t a_index)
+		{
+			return (a_bits[a_index >> 6] >> (a_index & 63)) & 1;
 		}
 
 		// Changes a texel's roof or cap target and starts its fade. Returns whether it changed.
@@ -341,6 +354,7 @@ namespace Shelter
 		g_filledY.clear();
 		g_queued.clear();
 		g_holes.clear();
+		g_refresh.clear();
 		g_allocated = false;
 		g_haveCentre = false;
 		g_dirty = false;
@@ -357,6 +371,7 @@ namespace Shelter
 		std::fill(g_filledY.begin(), g_filledY.end(), -0x40000000);
 		std::fill(g_queued.begin(), g_queued.end(), ~0ull);
 		std::fill(g_holes.begin(), g_holes.end(), 0ull);
+		std::fill(g_refresh.begin(), g_refresh.end(), 0ull);
 		g_cursor = 0;
 		g_ageCursor = 0;
 		g_holeCursor = 0;
@@ -504,7 +519,7 @@ namespace Shelter
 
 		const uint32_t aging = static_cast<uint32_t>(std::max(Settings::shelterRefresh, 0));
 		for (uint32_t i = 0; i < aging; ++i) {
-			g_filledX[g_ageCursor] = -0x40000000;
+			SetBit(g_refresh, g_ageCursor);
 			SetBit(g_queued, g_ageCursor);
 			ClearBit(g_holes, g_ageCursor);
 			g_ageCursor = (g_ageCursor + 1) % total;
@@ -512,12 +527,24 @@ namespace Shelter
 
 		const uint32_t budget = static_cast<uint32_t>(std::max(Settings::shelterBudget, 1));
 
-		static uint32_t reportedRays = 0, roofChanges = 0, capChanges = 0;
+		static uint32_t reportedRays = 0, skippedRays = 0, roofChanges = 0, capChanges = 0;
 		uint32_t rays = 0;
+		uint32_t skipped = 0;
 		uint32_t scanned = 0;
 
 		const uint32_t raysPerCell = Settings::shelterMeshCap && Ready() ? 2u : 1u;
 		const uint32_t limit = std::max(budget, raysPerCell);
+
+		// A read that can see snow reaches roof and cap texels this many cells from a snowy
+		// coverage texel: the coverage seam, the shelter seam and the bilinear footprint both
+		// maps are sampled with. Wider seams make the check too slow, so they refresh all.
+		const int32_t snowReach =
+			std::clamp(Settings::snowSeamTexels, 0, static_cast<int>(SnowCoverage::kTexels / 4)) +
+			std::clamp(Settings::shelterSeamTexels, 0, static_cast<int>(kTexels / 4)) + 1;
+		const bool skipBare = Settings::shelterRefreshSnowOnly && snowReach <= kMaxSnowReach;
+		// While SnowCoverage::At reads 1 everywhere, object contact and trench depth read CapAt
+		// on bare ground too, so there the cap keeps its refresh.
+		const bool refreshBareCap = !SnowCoverage::Mapped();
 
 		// Once the queue is empty, the budget it did not need re-queues holes for one more lap,
 		// at most once a frame, so land that streams in late is still found without holding up
@@ -564,7 +591,8 @@ namespace Shelter
 			const int32_t cellY =
 				baseY + static_cast<int32_t>((ty - static_cast<uint32_t>(baseY)) & kMask);
 
-			if (g_filledX[index] == cellX && g_filledY[index] == cellY) {
+			const bool filled = g_filledX[index] == cellX && g_filledY[index] == cellY;
+			if (filled && !TestBit(g_refresh, index)) {
 				continue;
 			}
 
@@ -581,22 +609,37 @@ namespace Shelter
 				SetBit(g_holes, index);
 				continue;
 			}
+			ClearBit(g_refresh, index);
 
-			const bool occluded = Occluded(tes, probe.x, probe.y, landZ);
+			// A refresh of a cell with no snow near it skips its rays, since no read that can
+			// see snow reaches its targets for this cell (the lift class map also reads its cap
+			// for the coverage 128 cells away, see ShelterRefreshSnowOnly). It still costs the
+			// budget, so every other texel is probed on the same frame as before.
+			const bool bare = skipBare && filled && SnowCoverage::NoSnowNear(cellX, cellY, snowReach);
+
+			if (bare) {
+				++skipped;
+			} else {
+				const bool occluded = Occluded(tes, probe.x, probe.y, landZ);
+
+				const uint8_t value = occluded ? 255 : 0;
+				if (SetTarget(g_raw, index, value)) {
+					++roofChanges;
+				}
+			}
 			++rays;
 
-			const uint8_t value = occluded ? 255 : 0;
-			if (SetTarget(g_raw, index, value)) {
-				++roofChanges;
-			}
-
 			if (Settings::shelterMeshCap && Ready()) {
-				const uint8_t cap = CapFor(tes, probe.x, probe.y, landZ);
-				++rays;
+				if (bare && !refreshBareCap) {
+					++skipped;
+				} else {
+					const uint8_t cap = CapFor(tes, probe.x, probe.y, landZ);
 
-				if (SetTarget(g_cap, index, cap)) {
-					++capChanges;
+					if (SetTarget(g_cap, index, cap)) {
+						++capChanges;
+					}
 				}
+				++rays;
 			}
 
 			g_filledX[index] = cellX;
@@ -653,15 +696,16 @@ namespace Shelter
 			}
 		}
 
-		reportedRays += rays;
+		reportedRays += rays - skipped;
+		skippedRays += skipped;
 		static auto reportAt = std::chrono::steady_clock::now();
 		const auto now = std::chrono::steady_clock::now();
 		if (now - reportAt >= std::chrono::seconds(5)) {
 			if (Settings::logSnowCoverage) {
-				logger::info("Shelter transitions: {} rays, {} roof target changes, {} cap target changes; blending={}",
-					reportedRays, roofChanges, capChanges, g_transition);
+				logger::info("Shelter transitions: {} rays, {} skipped with no snow near, {} roof target changes, {} cap target changes; blending={}",
+					reportedRays, skippedRays, roofChanges, capChanges, g_transition);
 			}
-			reportedRays = roofChanges = capChanges = 0;
+			reportedRays = skippedRays = roofChanges = capChanges = 0;
 			reportAt = now;
 		}
 		Profiler::AddCpuTicks(Profiler::CpuScope::kShelter, Profiler::Ticks() - started);

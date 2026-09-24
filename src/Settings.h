@@ -82,6 +82,15 @@ namespace Settings
 
 	inline int shelterRefresh{ 16 };
 
+	// Skip the rays of a refresh (above) where no snow is near enough for any read that can see
+	// snow to reach the texel. A texel is still probed once for each cell it holds, so while
+	// the collision does not change, every map comes out the same. Collision that changes under
+	// such a texel later is not picked up until it is probed for a cell again; until then a
+	// snowy read only sees that where the texel still shows, or fades from, its value for the
+	// next cell it holds, across the window's seam, or in the lift class map of
+	// TessellationSkipFlat, which also reads each cap texel for the coverage 128 cells away.
+	inline bool shelterRefreshSnowOnly{ true };
+
 	inline float shelterClearance{ 48.0f };
 
 	inline float shelterHeight{ 1024.0f };

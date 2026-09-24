@@ -399,6 +399,8 @@ namespace Settings
 		} else if (key == "ShelterRefresh") {
 			shelterRefresh = static_cast<int>(
 				Clamped(key, AsFloat(key, value, 16), 0.0f, 2048.0f));
+		} else if (key == "ShelterRefreshSnowOnly") {
+			shelterRefreshSnowOnly = AsBool(value);
 		} else if (key == "ShelterClearance") {
 			shelterClearance = Clamped(key, AsFloat(key, value, 48.0f), 1.0f, 2048.0f);
 		} else if (key == "ShelterHeight") {
