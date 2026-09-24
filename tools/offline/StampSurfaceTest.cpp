@@ -72,7 +72,8 @@ class Field
 	ComPtr<ID3D11ShaderResourceView> coarseHeight, coarseMeta;
 	ComPtr<ID3D11Texture2D> coverage, meshCap;
 	ComPtr<ID3D11ShaderResourceView> coverageSRV, meshCapSRV;
-	ComPtr<ID3D11Buffer> cb;
+	ComPtr<ID3D11Buffer> cb, bounds;
+	ComPtr<ID3D11ShaderResourceView> boundsSRV;
 	ComPtr<ID3D11SamplerState> sampler;
 public:
 	Field()
@@ -115,6 +116,15 @@ public:
 		buffer.ByteWidth = sizeof(Params);
 		buffer.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
 		Check(device->CreateBuffer(&buffer, nullptr, &cb), "Params buffer");
+		// The update shader's copy of Params::stampBounds (StampBoundsBuffer, t7).
+		buffer.ByteWidth = sizeof(Params::stampBounds);
+		buffer.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+		Check(device->CreateBuffer(&buffer, nullptr, &bounds), "Stamp bounds buffer");
+		D3D11_SHADER_RESOURCE_VIEW_DESC boundsView{};
+		boundsView.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+		boundsView.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+		boundsView.Buffer.NumElements = Clipmap::kMaxStamps;
+		Check(device->CreateShaderResourceView(bounds.Get(), &boundsView, &boundsSRV), "Stamp bounds SRV");
 		D3D11_SAMPLER_DESC sd{};
 		sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
 		sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
@@ -284,19 +294,21 @@ RWTexture2D<float> Result : register(u0);
 		Params filled = params;
 		Clipmap::FillStampBounds(filled, Clipmap::kMaxStamps);
 		context->UpdateSubresource(cb.Get(), 0, nullptr, &filled, 0, 0);
+		context->UpdateSubresource(bounds.Get(), 0, nullptr, filled.stampBounds, 0, 0);
 		ID3D11UnorderedAccessView* uavs[]{ heightUAV.Get(), metaUAV.Get(), activityUAV.Get() };
 		ID3D11ShaderResourceView* srvs[]{ nullptr, seed ? coarseHeight.Get() : nullptr,
-			seed ? coarseMeta.Get() : nullptr, coverageSRV.Get(), meshCapSRV.Get() };
+			seed ? coarseMeta.Get() : nullptr, coverageSRV.Get(), meshCapSRV.Get(), nullptr, nullptr,
+			boundsSRV.Get() };
 		context->CSSetShader(shader.Get(), nullptr, 0);
-		context->CSSetShaderResources(0, 5, srvs);
+		context->CSSetShaderResources(0, 8, srvs);
 		context->CSSetSamplers(0, 1, sampler.GetAddressOf());
 		context->CSSetConstantBuffers(0, 1, cb.GetAddressOf());
 		context->CSSetUnorderedAccessViews(0, 3, uavs, nullptr);
 		context->Dispatch(N / 8, N / 8, 1);
 		ID3D11UnorderedAccessView* nullUAVs[3]{};
-		ID3D11ShaderResourceView* nullSRVs[5]{};
+		ID3D11ShaderResourceView* nullSRVs[8]{};
 		context->CSSetUnorderedAccessViews(0, 3, nullUAVs, nullptr);
-		context->CSSetShaderResources(0, 5, nullSRVs);
+		context->CSSetShaderResources(0, 8, nullSRVs);
 	}
 	std::vector<float> Read()
 	{

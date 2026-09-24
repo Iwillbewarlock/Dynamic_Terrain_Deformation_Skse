@@ -148,7 +148,7 @@ namespace
 		const std::string field = "RWTexture2D<float> Field : register(u0);";
 		const size_t      at = a_source.find(field);
 		Require(at != std::string::npos, "Field declaration not found");
-		a_source.insert(at + field.size(), "\nTexture2D<float> FieldBefore : register(t7);");
+		a_source.insert(at + field.size(), "\nTexture2D<float> FieldBefore : register(t8);");
 		return a_source;
 	}
 
@@ -318,6 +318,18 @@ namespace
 				Check(_device->CreateBuffer(&buffer, nullptr, &read), "count readback");
 			}
 
+			// The update shader's copy of the stamp rectangles, as in Clipmap::Initialize.
+			buffer.ByteWidth = sizeof(Params::stampBounds);
+			buffer.Usage = D3D11_USAGE_DYNAMIC;
+			buffer.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+			buffer.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+			Check(_device->CreateBuffer(&buffer, nullptr, &_bounds), "stamp bounds");
+			D3D11_SHADER_RESOURCE_VIEW_DESC boundsView{};
+			boundsView.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+			boundsView.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+			boundsView.Buffer.NumElements = kStamps;
+			Check(_device->CreateShaderResourceView(_bounds.Get(), &boundsView, &_boundsSRV), "stamp bounds SRV");
+
 			D3D11_QUERY_DESC query{ D3D11_QUERY_TIMESTAMP_DISJOINT, 0 };
 			Check(_device->CreateQuery(&query, &_disjoint), "CreateQuery");
 			query.Query = D3D11_QUERY_TIMESTAMP;
@@ -419,6 +431,18 @@ namespace
 			_context->CSSetShaderResources(3, 2, floorMaps);
 			_context->CSSetSamplers(0, 1, _sampler.GetAddressOf());
 
+			// One copy of the stamp rectangles for both levels, as Clipmap::Update writes it.
+			for (uint32_t level = 1; level < kLevels; ++level) {
+				Require(std::memcmp(a_levels[0].stampBounds, a_levels[level].stampBounds,
+							sizeof(Params::stampBounds)) == 0,
+					"the levels' stamp rectangles differ");
+			}
+			D3D11_MAPPED_SUBRESOURCE bounds{};
+			Check(_context->Map(_bounds.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &bounds), "Map stamp bounds");
+			std::memcpy(bounds.pData, a_levels[0].stampBounds, sizeof(Params::stampBounds));
+			_context->Unmap(_bounds.Get(), 0);
+			_context->CSSetShaderResources(7, 1, _boundsSRV.GetAddressOf());
+
 			for (uint32_t i = 0; i < kLevels; ++i) {
 				const uint32_t level = kLevels - 1 - i;
 				const bool     hasCoarser = level + 1 < kLevels;
@@ -451,7 +475,7 @@ namespace
 				if (a_withoutRace) {
 					_context->CopyResource(a_side.before.Get(), target.field.Get());
 					ID3D11ShaderResourceView* before = a_side.beforeSRV.Get();
-					_context->CSSetShaderResources(7, 1, &before);
+					_context->CSSetShaderResources(8, 1, &before);
 				}
 
 				_context->CSSetConstantBuffers(0, 1, _params.GetAddressOf());
@@ -494,12 +518,13 @@ namespace
 
 				ID3D11UnorderedAccessView* nullUAVs[4] = {};
 				_context->CSSetUnorderedAccessViews(0, 4, nullUAVs, noOffset);
-				ID3D11ShaderResourceView* nullSRVs[3] = {};
+				ID3D11ShaderResourceView* nullSRVs[2] = {};
 				_context->CSSetShaderResources(1, 2, nullSRVs);
-				_context->CSSetShaderResources(5, 3, nullSRVs);
+				_context->CSSetShaderResources(5, 2, nullSRVs);
+				_context->CSSetShaderResources(8, 1, nullSRVs);
 			}
-			ID3D11ShaderResourceView* nullSRVs[5] = {};
-			_context->CSSetShaderResources(0, 5, nullSRVs);
+			ID3D11ShaderResourceView* nullSRVs[8] = {};
+			_context->CSSetShaderResources(0, 8, nullSRVs);
 		}
 
 		// After an Update with a_stats: the share of the level's groups its list held, or
@@ -618,6 +643,8 @@ namespace
 		ComPtr<ID3D11Buffer>             _args;
 		ComPtr<ID3D11UnorderedAccessView> _argsUAV;
 		ComPtr<ID3D11Buffer>             _readCount[kLevels];
+		ComPtr<ID3D11Buffer>             _bounds;
+		ComPtr<ID3D11ShaderResourceView> _boundsSRV;
 		bool                             _listed[kLevels]{};
 		ComPtr<ID3D11Query>              _disjoint;
 		ComPtr<ID3D11Query>              _start;

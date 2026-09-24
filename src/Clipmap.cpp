@@ -124,6 +124,9 @@ namespace Clipmap
 		ID3D11ComputeShader*       g_updateCS{ nullptr };
 		ID3D11ComputeShader*       g_updateListedCS{ nullptr };
 		ID3D11Buffer*              g_paramsCB{ nullptr };
+		// ParamsCB::stampBounds again, for the update shader's group test (StampBoundsBuffer).
+		ID3D11Buffer*              g_stampBounds{ nullptr };
+		ID3D11ShaderResourceView*  g_stampBoundsSRV{ nullptr };
 		ID3D11Buffer*              g_windowCB{ nullptr };
 		bool                       g_failed{ false };
 
@@ -136,9 +139,9 @@ namespace Clipmap
 		float g_windowHalfExtent{ 0.0f };
 		bool  g_windowValid{ false };
 
-		// Slots the update and group list passes bind: u0-u3 and t0-t6.
+		// Slots the update and group list passes bind: u0-u3 and t0-t7.
 		constexpr UINT kComputeUAVs = 4;
-		constexpr UINT kComputeSRVs = 7;
+		constexpr UINT kComputeSRVs = 8;
 
 		struct ComputeStageGuard
 		{
@@ -852,6 +855,20 @@ namespace Clipmap
 			return fail("CreateBuffer (window) failed");
 		}
 
+		D3D11_BUFFER_DESC boundsDesc = cbDesc;
+		boundsDesc.ByteWidth = sizeof(ParamsCB::stampBounds);
+		boundsDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
+		D3D11_SHADER_RESOURCE_VIEW_DESC boundsView{};
+		boundsView.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+		boundsView.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+		boundsView.Buffer.NumElements = kMaxStamps;
+
+		if (FAILED(device->CreateBuffer(&boundsDesc, nullptr, &g_stampBounds)) ||
+			FAILED(device->CreateShaderResourceView(g_stampBounds, &boundsView, &g_stampBoundsSRV))) {
+			return fail("CreateBuffer (stamp bounds) failed");
+		}
+
 		const std::string update = UpdateShaderSource();
 		if (!CompileComputeShader(device, update, "ClipmapUpdateCS", &g_updateCS) ||
 			!CompileComputeShader(device, update, "ClipmapUpdateCS (group list)", &g_updateListedCS, true)) {
@@ -880,6 +897,8 @@ namespace Clipmap
 
 		drop(g_windowCB);
 		drop(g_paramsCB);
+		drop(g_stampBoundsSRV);
+		drop(g_stampBounds);
 		drop(g_updateCS);
 		drop(g_updateListedCS);
 		drop(g_sampler);
@@ -1072,6 +1091,16 @@ namespace Clipmap
 			const UINT noOffset[kComputeUAVs] = { static_cast<UINT>(-1), static_cast<UINT>(-1),
 				static_cast<UINT>(-1), static_cast<UINT>(-1) };
 
+			// The update's copy of the stamp rectangles, the same for both levels. If it
+			// cannot be written, the buffer still holds last frame's, so nothing updates.
+			D3D11_MAPPED_SUBRESOURCE boundsMap{};
+			if (FAILED(context->Map(g_stampBounds, 0, D3D11_MAP_WRITE_DISCARD, 0, &boundsMap))) {
+				return;
+			}
+			std::memcpy(boundsMap.pData, params.stampBounds, sizeof(params.stampBounds));
+			context->Unmap(g_stampBounds, 0);
+			context->CSSetShaderResources(7, 1, &g_stampBoundsSRV);
+
 			ID3D11ShaderResourceView* shape = StampShapes::View();
 			context->CSSetShaderResources(0, 1, &shape);
 
@@ -1200,6 +1229,7 @@ namespace Clipmap
 
 			ID3D11ShaderResourceView* nullFloor[2] = { nullptr, nullptr };
 			context->CSSetShaderResources(3, 2, nullFloor);
+			context->CSSetShaderResources(7, 1, nullFloor);
 
 			Profiler::GpuEnd();
 		}

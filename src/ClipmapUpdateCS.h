@@ -117,6 +117,11 @@ StructuredBuffer<uint> GroupList : register(t5);
 ByteAddressBuffer      GroupCount : register(t6);
 #endif
 
+// The same rows as StampBounds in Params, copied by Clipmap::Update. The group test below
+// reads a different stamp in each thread, and constant buffer reads at different
+// addresses in one wave take turns on NVIDIA; a buffer load does not.
+Buffer<float4> StampBoundsBuffer : register(t7);
+
 cbuffer Params : register(b0)
 {
 
@@ -144,6 +149,8 @@ cbuffer Params : register(b0)
 
 	float4 RaiseWindow;
 
+	// The update reads its copy, StampBoundsBuffer. The group list pass reads these rows,
+	// the same stamp in every thread, which a constant buffer serves faster than a buffer.
 	float4 StampBounds[MAX_STAMPS];
 
 	uint4 NoNoiseMask;
@@ -387,7 +394,7 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID,
 		// whole window when the group straddles the wrap), padded by a cell so float
 		// rounding can never drop a stamp that a texel below would accept. The CPU
 		// turns the texel test below into one rectangle per stamp (FillStampBounds),
-		// so a thread reads one row here instead of three.
+		// so a thread reads one row here instead of three, from StampBoundsBuffer.
 		const int2 first = (int2(gid.xy * 8) - base) & mask;
 		const bool2 wraps = first + 7 > mask;
 		const float2 cornerA = float2(base + (wraps ? 0 : first) - 1) * Window.z;
@@ -396,7 +403,7 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID,
 		const float2 groupHi = max(cornerA, cornerB);
 
 		for (int i = (int)groupIndex; i < count; i += 64) {
-			const float4 bounds = StampBounds[i];
+			const float4 bounds = StampBoundsBuffer[i];
 			if (any(groupHi < bounds.xy) || any(groupLo > bounds.zw)) {
 				continue;
 			}
