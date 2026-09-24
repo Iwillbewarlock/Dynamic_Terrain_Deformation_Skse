@@ -32,12 +32,30 @@ namespace BloodDecals
 			RE::BGSTextureSet* second{};
 			bool operator==(const Entry&) const = default;
 		};
+		// And the diffuse paths of those texture sets, kept apart so that passes which do not
+		// compare them do not read them. The paths are pooled strings, so a path assigned at run
+		// time (as SKSE's TextureSet.SetNthTexturePath can) reads as a new pointer. Only the
+		// pointer is kept: if the string read at a full pass is freed and a different one made at
+		// its address before the next comparison (one slot assigned twice in between), the change
+		// goes unnoticed and that pass's answer stands until the list changes or a reload.
+		using Paths = std::array<const char*, 2>;
 		struct Scan
 		{
 			std::vector<Entry> entries;
+			std::vector<Paths> paths;
 			std::vector<std::uint32_t> blood;
+			std::uint64_t listed{};  // the last frame Update() passed this node
+			std::uint64_t drawn{};   // the last frame Contains() passed it
 		};
 		std::unordered_map<RE::BGSDecalNode*, Scan> scanned;
+		Scan direct, simple;  // the manager's own lists
+		std::uint64_t frame{};
+		void Forget()
+		{
+			scanned.clear();
+			direct = {};
+			simple = {};
+		}
 		std::string prefixSource;
 		BloodDecalFilter::Prefixes prefixes;
 		const char* Diffuse(RE::BGSTextureSet* set)
@@ -133,10 +151,6 @@ namespace BloodDecals
 			Place(decal);
 			return true;
 		}
-		void Observe(RE::BSTempEffect* effect)
-		{
-			if (effect && visited.insert(effect).second) { Classify(effect); }
-		}
 		Entry Read(RE::BSTempEffect* effect)
 		{
 			Entry entry{ effect, effect ? effect->GetRTTI() : nullptr };
@@ -149,23 +163,29 @@ namespace BloodDecals
 			}
 			return entry;
 		}
-		// Contains() re-observes a node's decals for each decal drawn under it that is not a
-		// target yet, which costs the node's decal count squared. When every entry reads the same
-		// as at this frame's last full pass, the texture half of Classify() would repeat its answers
-		// (texture sets are form data) and its already made reports, so only the blood entries,
-		// which their receivers decide, are placed again. Any difference, such as a decal attached
-		// since or a reused slot, repeats the full pass.
-		void Rescan(RE::BGSDecalNode* node)
+		Paths PathsOf(const Entry& entry)
 		{
-			const auto& effects = node->GetRuntimeData().decals;
-			auto& scan = scanned[node];
+			return { Diffuse(entry.first), Diffuse(entry.second) };
+		}
+		// Update() classifies every listed decal each frame, and Contains() a node's decals for
+		// each decal drawn under it that is not a target yet, which costs the node's decal count
+		// squared. When every entry reads the same as at the list's last full pass, the texture
+		// half of Classify() would repeat its answers, and its reports, made or refused (at the
+		// cap or with logging off) at that pass, would be refused again until a reload's Reset()
+		// forgets the scans. So only the blood entries, which their receivers decide, are placed
+		// again. Any difference, such as a decal attached since or a reused slot, repeats the full
+		// pass. Without `paths`, a path rewritten since that pass goes unnoticed.
+		template <class List>
+		void Rescan(Scan& scan, const List& effects, bool paths)
+		{
 			bool same = scan.entries.size() == effects.size();
 			for (std::uint32_t index = 0; same && index < effects.size(); ++index) {
-				same = Read(effects[index].get()) == scan.entries[index];
+				const Entry entry = Read(effects[index].get());
+				same = entry == scan.entries[index] && (!paths || PathsOf(entry) == scan.paths[index]);
 			}
 			if (same) {
 				for (const auto index : scan.blood) {
-					auto* effect = effects[index].get();
+					RE::BSTempEffect* effect = effects[index].get();
 					if (auto* decal = netimmerse_cast<RE::BSTempEffectSimpleDecal*>(effect)) {
 						Place(decal);
 					} else if (auto* geometry = netimmerse_cast<RE::BSTempEffectGeometryDecal*>(effect)) {
@@ -175,12 +195,23 @@ namespace BloodDecals
 				return;
 			}
 			scan.entries.clear();
+			scan.paths.clear();
 			scan.blood.clear();
 			for (std::uint32_t index = 0; index < effects.size(); ++index) {
-				auto* effect = effects[index].get();
+				RE::BSTempEffect* effect = effects[index].get();
 				scan.entries.push_back(Read(effect));
+				scan.paths.push_back(PathsOf(scan.entries.back()));
 				if (effect && Classify(effect)) { scan.blood.push_back(index); }
 			}
+		}
+		// A node's first pass from Contains() in a frame used to be a full one, so it compares the
+		// paths as well; later passes in the frame compare what they compared before.
+		void Rescan(RE::BGSDecalNode* node)
+		{
+			auto& scan = scanned[node];
+			const bool first = scan.drawn != frame;
+			scan.drawn = frame;
+			Rescan(scan, node->GetRuntimeData().decals, first);
 		}
 	}
 
@@ -188,8 +219,14 @@ namespace BloodDecals
 	{
 		targets.clear();
 		visited.clear();
-		scanned.clear();
-		if (!Settings::enableBloodDecals || !Settings::enableTessellation || !Settings::useClipmap) { return; }
+		++frame;
+		// New prefixes come with a reload, whose Reset() forgets the scans as well.
+		if (prefixSource != Settings::bloodDecalTexturePrefixes) { Forget(); }
+		if (!Settings::enableBloodDecals || !Settings::enableTessellation || !Settings::useClipmap) {
+			// Contains() can still rescan nodes; those scans last one frame, as before.
+			Forget();
+			return;
+		}
 		if (!reportedStart) {
 			reportedStart = true;
 			logger::info("Blood decals B4 enabled: direct lists and attached nodes, prefixes={}", Settings::bloodDecalTexturePrefixes);
@@ -199,18 +236,33 @@ namespace BloodDecals
 			if (reported.insert("no-manager").second) { logger::info("Blood decals B4: decal manager unavailable"); }
 			return;
 		}
-		for (const auto& effect : manager->decals) {
-			Observe(effect.get());
-		}
-		for (const auto& decal : manager->simpleDecals) {
-			Observe(decal.get());
-		}
+		// In the order the effects were observed before. An effect listed twice is classified
+		// twice, which places and reports nothing new.
+		Rescan(direct, manager->decals, true);
+		Rescan(simple, manager->simpleDecals, true);
 		size_t attached = 0;
 		for (const auto& node : manager->decalNodes) {
 			if (!node) { continue; }
 			const auto& effects = node->GetRuntimeData().decals;
 			attached += effects.size();
-			for (const auto& effect : effects) { Observe(effect.get()); }
+			auto& scan = scanned[node.get()];
+			scan.listed = frame;
+			Rescan(scan, effects, true);
+		}
+		// A node neither listed nor drawn since the last frame starts again from a full pass.
+		std::erase_if(scanned, [](const auto& item) {
+			return std::max(item.second.listed, item.second.drawn) + 1 < frame;
+		});
+		// Only the census reads the count of distinct effects.
+		if (Logging()) {
+			for (const auto& effect : manager->decals) { if (effect) { visited.insert(effect.get()); } }
+			for (const auto& decal : manager->simpleDecals) { if (decal) { visited.insert(decal.get()); } }
+			for (const auto& node : manager->decalNodes) {
+				if (!node) { continue; }
+				for (const auto& effect : node->GetRuntimeData().decals) {
+					if (effect) { visited.insert(effect.get()); }
+				}
+			}
 		}
 		const std::array<size_t, 6> counts{ manager->decals.size(), manager->simpleDecals.size(),
 			manager->decalNodes.size(), attached, visited.size(), targets.size() };
@@ -272,7 +324,7 @@ namespace BloodDecals
 	void Reset()
 	{
 		targets.clear(); reported.clear(); reportedDrawTextures.clear();
-		visited.clear(); scanned.clear(); lastCounts = {}; nextCensus = {};
+		visited.clear(); Forget(); lastCounts = {}; nextCensus = {};
 		reportedDraw = reportedSkip = reportedStart = false;
 	}
 }
