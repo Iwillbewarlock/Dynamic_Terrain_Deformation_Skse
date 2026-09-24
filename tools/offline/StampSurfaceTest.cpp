@@ -45,6 +45,11 @@ struct Params
 	float raiseWindow[4]{ 0, 0, 1.0e6f, 2.0e6f };
 	float stampBounds[Clipmap::kMaxStamps][4]{};
 	uint32_t noNoiseMask[4]{};
+	// One update group per activity texel on this 64-texel field, so each group
+	// writes its own cell of the 32x32 activity map.  The shader reads this row
+	// as the end of Params; leaving it out would make the constant buffer 16
+	// bytes short and turn the cell index into a divide by zero.
+	uint32_t activityShape[4]{ 1, Clipmap::kActivityTexels - 1, 0, 0 };
 	Params()
 	{
 		stamps[0][2] = 5;
@@ -197,7 +202,7 @@ public:
 				auto* srv = (slot + phase) % 2 ? nullptr : view.Get();
 				auto* state = (slot + phase) % 2 ? nullptr : sampler.Get();
 				context->DSSetShaderResources(slot, 1, &srv);
-				if (slot == 0) { context->HSSetShaderResources(slot, 1, &srv); }
+				if (slot < 3) { context->HSSetShaderResources(slot, 1, &srv); }
 				if (slot < 3) { context->DSSetSamplers(slot, 1, &state); }
 			}
 			saved.Restore(context.Get());
