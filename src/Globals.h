@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (c) 2026 NearMidnightNow (NMN).
+// Community Shaders globals layout and references are credited in NOTICE.
+// Provenance notice added 2026-09-28.
 
 #pragma once
 

@@ -2,7 +2,7 @@
 
 Ground in Skyrim that actually takes a mark. Footprints, trenches through deep snow, wheel ruts, and blast craters are pressed into the landscape itself — real displaced geometry, not decals — and recover over time.
 
-A standalone SKSE plugin. **No Community Shaders dependency**; it works on vanilla Skyrim SE/AE, with or without ENB.
+A standalone SKSE plugin for Skyrim SE/AE, with or without ENB.
 
 Copyright (c) 2026 NearMidnightNow (NMN).
 
@@ -10,7 +10,7 @@ Licensed under the **GNU General Public License, version 3 only (GPL-3.0-only)**
 
 This is a heavily reduced standalone SKSE port of my own Community Shaders features — cs-footprints, cs-snowblanket, cs-snowcollision, and cs-snowbuildup.
 
-Third-party build dependencies remain under their own licences, as listed in [NOTICE](NOTICE).
+Includes code adapted from Community Shaders. See [NOTICE](NOTICE) for credits and third-party licences.
 
 ## Building
 

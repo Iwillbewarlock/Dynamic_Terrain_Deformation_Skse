@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Copyright (c) 2026 NearMidnightNow (NMN).
+// Modifications Copyright (c) 2026 NearMidnightNow (NMN).
+// Adapted from Community Shaders src/Utils/ActorUtils.cpp (GPLv3).
+// Upstream contributors: Alan Tse, doodlum and Dawntic. See NOTICE.
+// Renamed and refactored in the 2026-09-21 public snapshot.
+// Provenance notice added 2026-09-28.
 
 #include "PCH.h"
 
