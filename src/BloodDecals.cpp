@@ -20,7 +20,7 @@ namespace BloodDecals
 		std::unordered_set<std::string> reportedDrawTextures;
 		bool reportedDraw{}, reportedSkip{}, reportedStart{};
 		std::unordered_set<RE::BSTempEffect*> visited;
-		// Decal nodes whose decals have been observed this frame, by Update() or by a draw.
+
 		std::unordered_set<RE::BGSDecalNode*> observedNodes;
 		std::array<size_t, 6> lastCounts{};
 		std::chrono::steady_clock::time_point nextCensus{};
@@ -42,6 +42,8 @@ namespace BloodDecals
 		}
 		void Report(std::string_view kind, RE::BGSTextureSet* set)
 		{
+			const auto* log = spdlog::default_logger_raw();
+			if (reported.size() >= 64 || !log || !log->should_log(spdlog::level::info)) { return; }
 			const char* path = Diffuse(set);
 			const std::string key = std::string(kind) + ":" + (path ? path : "");
 			if (reported.size() < 64 && reported.insert(key).second) {
@@ -73,6 +75,8 @@ namespace BloodDecals
 			}
 			auto* decal = netimmerse_cast<RE::BSTempEffectGeometryDecal*>(effect);
 			if (!decal) {
+				const auto* log = spdlog::default_logger_raw();
+				if (reported.size() >= 64 || !log || !log->should_log(spdlog::level::info)) { return; }
 				const auto* rtti = effect->GetRTTI();
 				const std::string key = "type:" + std::string(rtti ? rtti->GetName() : "unknown");
 				if (reported.size() < 64 && reported.insert(key).second) {
@@ -142,8 +146,7 @@ namespace BloodDecals
 	{
 		if (!Settings::enableBloodDecals || !geometry) { return false; }
 		if (targets.contains(geometry)) { return true; }
-		// Observe() never makes skinned geometry a target, so a skinned decal draw can only
-		// return false here. Skin decals on actors are most of the decal draws.
+
 		if (geometry->GetGeometryRuntimeData().skinInstance) { return false; }
 		auto* property = geometry->GetGeometryRuntimeData().shaderProperty.get();
 		using Flag = RE::BSShaderProperty::EShaderPropertyFlag;
@@ -152,9 +155,7 @@ namespace BloodDecals
 		auto* parent = geometry->parent;
 		for (unsigned depth = 0; parent && depth < 8; ++depth, parent = parent->parent) {
 			if (auto* node = netimmerse_cast<RE::BGSDecalNode*>(parent)) {
-				// Once a frame per node: re-observing the whole node for every decal drawn under
-				// it cost the square of its decal count. A decal attached after this frame's pass
-				// is drawn natively until the next Update().
+
 				if (!observedNodes.insert(node).second) { break; }
 				for (const auto& effect : node->GetRuntimeData().decals) {
 					visited.erase(effect.get());

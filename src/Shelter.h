@@ -38,6 +38,7 @@ namespace Shelter
 	uint32_t Revision();
 
 	float AtCell(int32_t a_cellX, int32_t a_cellY);
+	uint32_t CombineCoverage(const uint8_t* source, uint8_t* output, int32_t baseX, int32_t baseY);
 
 	float CapAt(float a_worldX, float a_worldY);
 }

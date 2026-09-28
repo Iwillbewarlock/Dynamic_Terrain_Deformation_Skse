@@ -2,6 +2,9 @@
 // Copyright (c) 2026 NearMidnightNow (NMN).
 
 #include "PCH.h"
+#include "BoxFilter.h"
+#include "CoverageShelterCombine.h"
+#include "SnowCoverage.h"
 
 #include "Shelter.h"
 
@@ -10,6 +13,8 @@
 #include "Profiler.h"
 #include "Settings.h"
 #include "ShelterTransition.h"
+#include "ShelterFadeCells.h"
+#include "ShelterScan.h"
 
 #include <algorithm>
 #include <chrono>
@@ -34,6 +39,7 @@ namespace Shelter
 		std::vector<float> g_roofDisplay, g_capDisplay;
 		std::vector<uint8_t> g_roofVisible, g_capVisible;
 		bool g_transition{ false };
+		ShelterTransition::FadeCells g_fadeCells;
 
 		ID3D11Texture2D*          g_texture{ nullptr };
 		ID3D11ShaderResourceView* g_srv{ nullptr };
@@ -63,6 +69,7 @@ namespace Shelter
 
 			const size_t total = static_cast<size_t>(kTexels) * kTexels;
 			g_raw.assign(total, 0);
+			g_fadeCells.Reset(static_cast<uint32_t>(total));
 			g_smooth.assign(total, 0);
 			g_cap.assign(total, 255);
 			g_capSmooth.assign(total, 255);
@@ -146,39 +153,9 @@ namespace Shelter
 				return;
 			}
 
-			const int      width = 2 * r + 1;
-			const uint32_t area = static_cast<uint32_t>(width) * static_cast<uint32_t>(width);
-
-			for (int y = 0; y < n; ++y) {
-				const uint8_t* src = &a_src[static_cast<size_t>(y) * n];
-				uint32_t*      dst = &g_rowSums[static_cast<size_t>(y) * n];
-
-				uint32_t sum = 0;
-				for (int k = -r; k <= r; ++k) {
-					sum += src[static_cast<uint32_t>(k) & kMask];
-				}
-				for (int x = 0; x < n; ++x) {
-					dst[x] = sum;
-					sum -= src[static_cast<uint32_t>(x - r) & kMask];
-					sum += src[static_cast<uint32_t>(x + r + 1) & kMask];
-				}
-			}
-
-			for (int x = 0; x < n; ++x) {
-				uint32_t sum = 0;
-				for (int k = -r; k <= r; ++k) {
-					sum += g_rowSums[(static_cast<size_t>(static_cast<uint32_t>(k) & kMask) * n) +
-						static_cast<size_t>(x)];
-				}
-				for (int y = 0; y < n; ++y) {
-					a_dst[(static_cast<size_t>(y) * n) + static_cast<size_t>(x)] =
-						static_cast<uint8_t>(sum / area);
-					sum -= g_rowSums[(static_cast<size_t>(static_cast<uint32_t>(y - r) & kMask) * n) +
-						static_cast<size_t>(x)];
-					sum += g_rowSums[(static_cast<size_t>(static_cast<uint32_t>(y + r + 1) & kMask) * n) +
-						static_cast<size_t>(x)];
-				}
-			}
+			const auto started = Profiler::Ticks();
+			BoxFilter::Apply<kTexels>(a_src.data(), a_dst.data(), g_rowSums.data(), r);
+			Profiler::AddCpuTicks(Profiler::CpuScope::kShelterFilter, Profiler::Ticks() - started);
 		}
 	}
 
@@ -286,6 +263,7 @@ namespace Shelter
 		g_roofVisible.clear();
 		g_capVisible.clear();
 		g_transition = false;
+		g_fadeCells.Reset(0);
 		g_cap.clear();
 		g_capSmooth.clear();
 		g_raw.clear();
@@ -314,6 +292,7 @@ namespace Shelter
 		std::fill(g_raw.begin(), g_raw.end(), static_cast<uint8_t>(0));
 
 		g_transition = true;
+		g_fadeCells.ActivateAll();
 		g_capDirty = true;
 	}
 
@@ -387,6 +366,14 @@ namespace Shelter
 			(1.0f / 255.0f);
 	}
 
+	uint32_t CombineCoverage(const uint8_t* source, uint8_t* output, int32_t baseX, int32_t baseY)
+	{
+		static_assert(kTexelSize == SnowCoverage::kTexelSize);
+		const auto* roof = Settings::enableShelter && g_allocated && g_haveCentre ? g_smooth.data() : nullptr;
+		return CoverageShelter::Combine<SnowCoverage::kTexels, kTexels>(source, output,
+			baseX, baseY, roof, g_centreCellX, g_centreCellY);
+	}
+
 	void Update()
 	{
 		if (!Settings::enableShelter || !Settings::enableSnowRaise) {
@@ -434,15 +421,8 @@ namespace Shelter
 		const uint32_t budget = static_cast<uint32_t>(std::max(Settings::shelterBudget, 1));
 
 		static uint32_t reportedRays = 0, roofChanges = 0, capChanges = 0;
-		uint32_t rays = 0;
-		uint32_t scanned = 0;
-
 		const uint32_t raysPerCell = Settings::shelterMeshCap && Ready() ? 2u : 1u;
-		while (rays + raysPerCell <= std::max(budget, raysPerCell) && scanned < total) {
-			const uint32_t index = g_cursor;
-			g_cursor = (g_cursor + 1) % total;
-			++scanned;
-
+		const auto scan = ShelterScan::Run(g_cursor, total, budget, raysPerCell, [&](uint32_t index) {
 			const uint32_t tx = index & kMask;
 			const uint32_t ty = index / kTexels;
 
@@ -452,7 +432,7 @@ namespace Shelter
 				baseY + static_cast<int32_t>((ty - static_cast<uint32_t>(baseY)) & kMask);
 
 			if (g_filledX[index] == cellX && g_filledY[index] == cellY) {
-				continue;
+				return ShelterScan::Result::kCached;
 			}
 
 			const RE::NiPoint3 probe{
@@ -464,48 +444,56 @@ namespace Shelter
 			float landZ = 0.0f;
 			if (!tes->GetLandHeight(probe, landZ)) {
 
-				continue;
+				return ShelterScan::Result::kNoLand;
 			}
 
 			const bool occluded = Occluded(tes, probe.x, probe.y, landZ);
-			++rays;
 
 			const uint8_t value = occluded ? 255 : 0;
 			if (g_raw[index] != value) {
 				g_raw[index] = value;
 				++roofChanges;
+				g_fadeCells.Activate(index);
 				g_transition = true;
 			}
 
-			if (Settings::shelterMeshCap && Ready()) {
+			if (raysPerCell == 2) {
 				const uint8_t cap = CapFor(tes, probe.x, probe.y, landZ);
-				++rays;
 
 				if (g_cap[index] != cap) {
 					g_cap[index] = cap;
 					++capChanges;
+					g_fadeCells.Activate(index);
 					g_transition = true;
 				}
 			}
 
 			g_filledX[index] = cellX;
 			g_filledY[index] = cellY;
-		}
+			return ShelterScan::Result::kUpdated;
+		});
+		Profiler::Tally(Profiler::Count::kShelterLandAttempts, scan.attempts);
+		Profiler::Tally(Profiler::Count::kShelterLandMisses, scan.misses);
+		Profiler::Tally(Profiler::Count::kShelterRays, scan.rays);
 
 		if (g_transition) {
 			const float dt = globals::game::deltaTime ? *globals::game::deltaTime : 0.0f;
 			const float alpha = ShelterTransition::Alpha(dt);
 			bool pending = false;
-			for (size_t i = 0; i < g_raw.size(); ++i) {
-				pending |= ShelterTransition::Advance(g_roofDisplay[i], g_raw[i], alpha);
-				pending |= ShelterTransition::Advance(g_capDisplay[i], g_cap[i], alpha);
+			const auto visited = g_fadeCells.Advance([&](uint32_t i) {
+				bool cellPending = ShelterTransition::Advance(g_roofDisplay[i], g_raw[i], alpha);
+				cellPending |= ShelterTransition::Advance(g_capDisplay[i], g_cap[i], alpha);
+				pending |= cellPending;
 				const auto roof = static_cast<uint8_t>(g_roofDisplay[i] + 0.5f);
 				const auto cap = static_cast<uint8_t>(g_capDisplay[i] + 0.5f);
 				g_dirty |= roof != g_roofVisible[i];
 				g_capDirty |= cap != g_capVisible[i];
 				g_roofVisible[i] = roof;
 				g_capVisible[i] = cap;
-			}
+				return cellPending;
+			});
+			Profiler::Tally(Profiler::Count::kShelterFadeVisited, visited);
+			Profiler::Tally(Profiler::Count::kShelterFadeFull, total);
 			g_transition = pending;
 		}
 
@@ -532,7 +520,7 @@ namespace Shelter
 			}
 		}
 
-		reportedRays += rays;
+		reportedRays += scan.rays;
 		static auto reportAt = std::chrono::steady_clock::now();
 		const auto now = std::chrono::steady_clock::now();
 		if (now - reportAt >= std::chrono::seconds(5)) {

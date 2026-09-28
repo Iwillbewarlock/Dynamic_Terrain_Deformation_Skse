@@ -2,7 +2,6 @@
 // Copyright (c) 2026 NearMidnightNow (NMN).
 
 #pragma once
-#include <string>
 #include <string_view>
 
 namespace BloodDecalFilter
@@ -12,17 +11,22 @@ namespace BloodDecalFilter
 	{
 		const auto slash = path.find_last_of("/\\");
 		if (slash != std::string_view::npos) { path.remove_prefix(slash + 1); }
-		std::string name(path);
-		for (auto& c : name) { if (c >= 'A' && c <= 'Z') { c += 'a' - 'A'; } }
-		if (!name.ends_with(".dds")) { return false; }
+		const auto equalFolded = [](std::string_view a, std::string_view b) {
+			if (a.size() != b.size()) { return false; }
+			for (size_t i = 0; i < a.size(); ++i) {
+				const auto lower = [](char c) { return c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c; };
+				if (lower(a[i]) != lower(b[i])) { return false; }
+			}
+			return true;
+		};
+		if (path.size() < 4 || !equalFolded(path.substr(path.size() - 4), ".dds")) { return false; }
 		while (!prefixes.empty()) {
 			const auto end = prefixes.find(',');
 			auto token = prefixes.substr(0, end);
 			while (!token.empty() && (token.front() == ' ' || token.front() == '\t')) { token.remove_prefix(1); }
 			while (!token.empty() && (token.back() == ' ' || token.back() == '\t')) { token.remove_suffix(1); }
-			std::string prefix(token);
-			for (auto& c : prefix) { if (c >= 'A' && c <= 'Z') { c += 'a' - 'A'; } }
-			if (!prefix.empty() && name.starts_with(prefix)) { return true; }
+			if (!token.empty() && path.size() >= token.size() &&
+				equalFolded(path.substr(0, token.size()), token)) { return true; }
 			if (end == std::string_view::npos) { break; }
 			prefixes.remove_prefix(end + 1);
 		}

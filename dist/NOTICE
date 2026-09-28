@@ -21,6 +21,11 @@ Community Shaders (GPLv3)
   These provenance notices were added September 28, 2026.
 
 Iwillbewarlock / qtuna contributed the blood-decal performance fix (PR #5).
+The box filter in src/BoxFilter.h is adapted from their commit 426747c;
+tools/offline/ClipmapCSBench.cpp is adapted from their PR #2, commit 43b6d0f.
+These adaptations are distributed under GPL-3.0-only.
+The clipmap stamp-group rejection and coverage-overlap optimizations also
+follow ideas proposed by qtuna / Iwillbewarlock in their optimization work.
 
 Third-party dependencies remain under their respective licences. This project's
 licence does not replace the licences of those dependencies.
@@ -35,3 +40,6 @@ licence does not replace the licences of those dependencies.
 
 Refer to each dependency's distributed licence and copyright notices for its
 complete terms and attributions.
+
+The clipmap stamp-group rejection and coverage-overlap optimizations also
+follow ideas proposed by qtuna / Iwillbewarlock in their optimization work.

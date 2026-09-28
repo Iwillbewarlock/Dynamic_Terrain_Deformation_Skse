@@ -7,6 +7,7 @@
 #include "Clipmap.h"
 
 #include "ClipmapUpdateCS.h"
+#include "ClipmapMetadata.h"
 #include "Globals.h"
 #include "HeatSources.h"
 #include "MagicImpacts.h"
@@ -24,6 +25,7 @@
 #include <algorithm>
 #include <cmath>
 #include <unordered_map>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -61,10 +63,16 @@ namespace Clipmap
 			float raise[4]{};
 
 			float raiseWindow[4]{};
+			float stampBounds[kMaxStamps][4]{};
 		};
 		static_assert(sizeof(ParamsCB) % 16 == 0);
+		static_assert(offsetof(ParamsCB, stampBounds) == (4 * kMaxStamps + 8) * 16);
+		static_assert(sizeof(ParamsCB) == (5 * kMaxStamps + 8) * 16);
 
 		ID3D11Texture2D*           g_texture[kMaxLevels]{};
+		ID3D11Texture2D* g_nextField{};
+		ID3D11ShaderResourceView* g_nextFieldSRV{};
+		ID3D11UnorderedAccessView* g_nextFieldUAV{};
 		ID3D11ShaderResourceView*  g_srv[kMaxLevels]{};
 		ID3D11UnorderedAccessView* g_uav[kMaxLevels]{};
 
@@ -99,7 +107,7 @@ namespace Clipmap
 				_context->CSGetShader(&_shader, nullptr, nullptr);
 				_context->CSGetConstantBuffers(0, 1, &_cb);
 				_context->CSGetUnorderedAccessViews(0, 3, _uav);
-				_context->CSGetShaderResources(0, 5, _srv);
+				_context->CSGetShaderResources(0, 6, _srv);
 				_context->CSGetSamplers(0, 1, &_sampler);
 			}
 
@@ -110,7 +118,7 @@ namespace Clipmap
 				_context->CSSetShader(_shader, nullptr, 0);
 				_context->CSSetConstantBuffers(0, 1, &_cb);
 				_context->CSSetUnorderedAccessViews(0, 3, _uav, noOffset);
-				_context->CSSetShaderResources(0, 5, _srv);
+				_context->CSSetShaderResources(0, 6, _srv);
 				_context->CSSetSamplers(0, 1, &_sampler);
 
 				if (_shader) {
@@ -140,7 +148,7 @@ namespace Clipmap
 		private:
 			ID3D11DeviceContext*       _context;
 
-			ID3D11ShaderResourceView*  _srv[5]{};
+			ID3D11ShaderResourceView*  _srv[6]{};
 			ID3D11SamplerState*        _sampler{ nullptr };
 			ID3D11ComputeShader*       _shader{ nullptr };
 			ID3D11Buffer*              _cb{ nullptr };
@@ -167,6 +175,14 @@ namespace Clipmap
 			desc.Usage = D3D11_USAGE_DEFAULT;
 			desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
 
+			if (!g_nextField) {
+				if (FAILED(a_device->CreateTexture2D(&desc, nullptr, &g_nextField)) ||
+					FAILED(a_device->CreateShaderResourceView(g_nextField, nullptr, &g_nextFieldSRV)) ||
+					FAILED(a_device->CreateUnorderedAccessView(g_nextField, nullptr, &g_nextFieldUAV))) {
+					logger::error("Clipmap: spare height field allocation failed");
+					return false;
+				}
+			}
 			const std::vector<float> zeros(static_cast<size_t>(kTexels) * kTexels, 0.0f);
 			D3D11_SUBRESOURCE_DATA initial{};
 			initial.pSysMem = zeros.data();
@@ -188,14 +204,14 @@ namespace Clipmap
 			}
 
 			D3D11_TEXTURE2D_DESC decayDesc = desc;
-			decayDesc.Format = DXGI_FORMAT_R8G8_UNORM;
+			decayDesc.Format = kMetadataFormat;
 
 			decayDesc.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
 
-			const std::vector<uint8_t> decayZeros(static_cast<size_t>(kTexels) * kTexels * 2, 0);
+			const std::vector<MetadataChannel> decayZeros(static_cast<size_t>(kTexels) * kTexels * 2, 0);
 			D3D11_SUBRESOURCE_DATA decayInitial{};
 			decayInitial.pSysMem = decayZeros.data();
-			decayInitial.SysMemPitch = kTexels * 2 * sizeof(uint8_t);
+			decayInitial.SysMemPitch = kTexels * kMetadataPixelBytes;
 
 			if (FAILED(a_device->CreateTexture2D(
 					&decayDesc, &decayInitial, &g_decayTexture[a_level]))) {
@@ -497,8 +513,7 @@ namespace Clipmap
 			const float clearance =
 				Settings::stampGroundClearance * std::max(response.clearanceScale, 0.0f);
 
-			RE::BSVisit::TraverseScenegraphCollision(
-				root, [&](RE::bhkNiCollisionObject* a_object) -> RE::BSVisit::BSVisitControl {
+			const auto visitCollision = [&](RE::bhkNiCollisionObject* a_object) -> RE::BSVisit::BSVisitControl {
 					if (a_out.size() >= kMaxStamps) {
 						return RE::BSVisit::BSVisitControl::kStop;
 					}
@@ -534,11 +549,11 @@ namespace Clipmap
 						const bool  isFoot =
 							std::abs(side) >= Settings::stampFootSeparation;
 
-						float reportLand = 0.0f;
-						if (tes) {
-							tes->GetLandHeight(centre, reportLand);
+						if (Settings::logStampFeet) {
+							float reportLand = 0.0f;
+							if (tes) { tes->GetLandHeight(centre, reportLand); }
+							LogFootShape(side, radius, centre.z, reportLand, isFoot);
 						}
-						LogFootShape(side, radius, centre.z, reportLand, isFoot);
 
 						if (isFoot) {
 
@@ -576,7 +591,8 @@ namespace Clipmap
 					a_out.push_back(stamp);
 
 					return RE::BSVisit::BSVisitControl::kContinue;
-				});
+				};
+			RE::BSVisit::TraverseScenegraphCollision(root, std::cref(visitCollision));
 		}
 
 		std::vector<Stamp> GatherStamps(float a_deltaSeconds)
@@ -636,7 +652,7 @@ namespace Clipmap
 
 	bool Ready()
 	{
-		return g_srv[0] && g_uav[0] && g_sampler && g_updateCS && g_paramsCB && g_windowCB;
+		return g_nextFieldSRV && g_nextFieldUAV && g_srv[0] && g_uav[0] && g_sampler && g_updateCS && g_paramsCB && g_windowCB;
 	}
 
 	bool Initialize()
@@ -693,6 +709,9 @@ namespace Clipmap
 			return fail("update shader unavailable");
 		}
 
+		logger::info("Clipmap repose: immutable reads, shared 16 MiB height spare, no copy pass");
+		logger::info("Clipmap metadata: R16G16_UNORM, {} MiB allocated",
+			LevelCount() * kTexels * kTexels * kMetadataPixelBytes / (1024 * 1024));
 		logger::info("Clipmap ready: {} level(s), marks survive to {:.0f} world units "
 					 "({:.1f} m) from the player",
 			LevelCount(), WorldSizeFor(LevelCount() - 1) * 0.5f,
@@ -709,6 +728,9 @@ namespace Clipmap
 			}
 		};
 
+		drop(g_nextFieldUAV);
+		drop(g_nextFieldSRV);
+		drop(g_nextField);
 		drop(g_windowCB);
 		drop(g_paramsCB);
 		drop(g_updateCS);
@@ -815,6 +837,7 @@ namespace Clipmap
 			params.stampMotion[i][1] = stamps[i].motionY;
 			params.stampMotion[i][2] = stamps[i].snow ? 1.0f : 0.0f;
 		}
+		FillStampBounds(params, count);
 
 		auto* context = globals::d3d::context;
 
@@ -944,7 +967,8 @@ namespace Clipmap
 				const UINT zero[4] = { 0, 0, 0, 0 };
 				context->ClearUnorderedAccessViewUint(g_activityUAV[level], zero);
 
-				ID3D11UnorderedAccessView* uavs[3] = { g_uav[level], g_decayUAV[level],
+				context->CSSetShaderResources(5, 1, &g_srv[level]);
+				ID3D11UnorderedAccessView* uavs[3] = { g_nextFieldUAV, g_decayUAV[level],
 					g_activityUAV[level] };
 				context->CSSetConstantBuffers(0, 1, &g_paramsCB);
 				context->CSSetUnorderedAccessViews(0, 3, uavs, noOffset);
@@ -955,6 +979,10 @@ namespace Clipmap
 
 				ID3D11ShaderResourceView* nullSeeds[2] = { nullptr, nullptr };
 				context->CSSetShaderResources(1, 2, nullSeeds);
+				context->CSSetShaderResources(5, 1, nullSeeds);
+				std::swap(g_texture[level], g_nextField);
+				std::swap(g_srv[level], g_nextFieldSRV);
+				std::swap(g_uav[level], g_nextFieldUAV);
 			}
 
 			ID3D11ShaderResourceView* nullFloor[2] = { nullptr, nullptr };

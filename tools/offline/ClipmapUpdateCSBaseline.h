@@ -2,62 +2,10 @@
 // Copyright (c) 2026 NearMidnightNow (NMN).
 
 #pragma once
-
-#include "Clipmap.h"
-
-#include "Shelter.h"
-#include "SnowCoverage.h"
-
-#include <algorithm>
-#include <format>
-#include <string>
-
-namespace Clipmap
+namespace ClipmapBaseline
 {
-
-	inline constexpr float kPrintCoreLo = 0.06f;
-	inline constexpr float kPrintCoreHi = 0.96f;
-	inline constexpr float kPrintBandRiseLo = 0.14f;
-	inline constexpr float kPrintBandRiseHi = 0.34f;
-	inline constexpr float kPrintBandFallLo = 0.52f;
-	inline constexpr float kPrintBandFallHi = 0.84f;
-
-	inline float PrintHeightFor(float a_mask, float a_depth, float a_rim)
-	{
-		const auto smoothstep = [](float a_lo, float a_hi, float a_x) {
-			const float t = std::clamp((a_x - a_lo) / (a_hi - a_lo), 0.0f, 1.0f);
-			return t * t * (3.0f - 2.0f * t);
-		};
-
-		const float core = smoothstep(kPrintCoreLo, kPrintCoreHi, a_mask);
-		const float band = std::clamp(smoothstep(kPrintBandRiseLo, kPrintBandRiseHi, a_mask) -
-										  smoothstep(kPrintBandFallLo, kPrintBandFallHi, a_mask),
-			0.0f, 1.0f);
-
-		return a_rim * band - a_depth * core;
-	}
-
-	template <class Params>
-	void FillStampBounds(Params& params, uint32_t count)
-	{
-		for (uint32_t i = 0; i < std::min(count, kMaxStamps); ++i) {
-			const auto& stamp = params.stamps[i];
-			const auto& motion = params.stampMotion[i];
-			const bool snow = motion[2] > 0.5f;
-			const float span = snow ? params.snowRim[0] : params.control[3];
-			const float lean = snow ? params.snowRim[2] : params.rimShape[0];
-			const float reach = std::max(stamp[2], params.stampShape[i][2]) *
-				(1.0f + std::max(span, 0.0f) * (1.0f + std::clamp(lean, 0.0f, 1.0f)));
-			for (uint32_t axis = 0; axis < 2; ++axis) {
-				params.stampBounds[i][axis] = stamp[axis] + (std::min(0.0f, -motion[axis]) - reach);
-				params.stampBounds[i][axis + 2] = stamp[axis] + (std::max(0.0f, -motion[axis]) + reach);
-			}
-		}
-	}
-
 	constexpr char kUpdateShader[] = R"(
 RWTexture2D<float> Field : register(u0);
-Texture2D<float> FieldBefore : register(t5);
 
 RWTexture2D<float2> DecayRate : register(u1);
 
@@ -98,7 +46,6 @@ cbuffer Params : register(b0)
 	float4 Raise;
 
 	float4 RaiseWindow;
-	float4 StampBounds[MAX_STAMPS];
 };
 
 )"
@@ -263,8 +210,6 @@ float StampDistance(float2 worldXY, float4 s, float4 shape, float2 motion)
 
 		R"(
 groupshared uint gBlockMax;
-static const uint kStampWords = (MAX_STAMPS + 31) / 32;
-groupshared uint gStampHits[kStampWords];
 
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID,
@@ -272,9 +217,6 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID,
 {
 	if (groupIndex == 0) {
 		gBlockMax = 0;
-	}
-	if (groupIndex < kStampWords) {
-		gStampHits[groupIndex] = 0;
 	}
 	GroupMemoryBarrierWithGroupSync();
 
@@ -291,8 +233,9 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID,
 
 	float rimNoise = 0.0f;
 	float churn = 0.0f;
+	bool  haveNoise = false;
 
-	float h = FieldBefore[id.xy];
+	float h = Field[id.xy];
 	float2 metadata = DecayRate[id.xy];
 	float rate = metadata.x;
 	float snow = metadata.y >= 0.5f ? 1.0f : 0.0f;
@@ -318,38 +261,8 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID,
 	float targetRate = 0.0f;
 	float targetSnow = 0.0f;
 
-	const int2 first = (int2(gid.xy * 8) - base) & mask;
-	const bool2 wraps = first + 7 > mask;
-	const float2 groupLo = float2(base + (wraps ? 0 : first) - 1) * Window.z;
-	const float2 groupHi = float2(base + (wraps ? mask : first + 7) + 1) * Window.z;
-	const int count = min((int)Control.y, MAX_STAMPS);
-	for (int candidate = (int)groupIndex; candidate < count; candidate += 64) {
-		const float4 bounds = StampBounds[candidate];
-		if (!any(groupHi < bounds.xy) && !any(groupLo > bounds.zw)) {
-			InterlockedOr(gStampHits[candidate >> 5], 1u << (candidate & 31));
-		}
-	}
-	GroupMemoryBarrierWithGroupSync();
-
-	uint anyHit = 0;
-	[unroll] for (uint w = 0; w < kStampWords; ++w) {
-		anyHit |= gStampHits[w];
-	}
-
-	[branch] if (anyHit != 0) {
-		rimNoise = max(Weather.w, SnowRim.y) > 0.0f ? RimNoise(worldXY) : 0.0f;
-		churn = max(RimShape.y, SnowRim.w) > 0.0f ? ChurnNoise(worldXY) : 0.0f;
-	}
-
-	uint word = 0;
-	uint hits = gStampHits[0];
-	[loop] for (;;) {
-		[loop] while (hits == 0 && word + 1 < kStampWords) {
-			hits = gStampHits[++word];
-		}
-		if (hits == 0) { break; }
-		const int i = (int)(word * 32 + firstbitlow(hits));
-		hits &= hits - 1;
+	const int count = (int)Control.y;
+	for (int i = 0; i < count; ++i) {
 		const float4 s = Stamps[i];
 		const float4 p = StampParams[i];
 		const float2 motion = StampMotion[i].xy;
@@ -365,6 +278,12 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID,
 		const float2 hi = max(0.0f.xx, -motion) + reach;
 		if (any(delta < lo) || any(delta > hi)) {
 			continue;
+		}
+
+		if (!haveNoise) {
+			haveNoise = true;
+			rimNoise = max(Weather.w, SnowRim.y) > 0.0f ? RimNoise(worldXY) : 0.0f;
+			churn = max(RimShape.y, SnowRim.w) > 0.0f ? ChurnNoise(worldXY) : 0.0f;
 		}
 
 		const float  d = StampDistance(worldXY, s, StampShape[i], motion);
@@ -443,10 +362,10 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID,
 		const float maxStep = Window.z * Weather.y;
 
 		const int2 im = int2(mask, mask);
-		const float n0 = FieldBefore[uint2((int2(id.xy) + int2(-1, 0)) & im)];
-		const float n1 = FieldBefore[uint2((int2(id.xy) + int2(1, 0)) & im)];
-		const float n2 = FieldBefore[uint2((int2(id.xy) + int2(0, -1)) & im)];
-		const float n3 = FieldBefore[uint2((int2(id.xy) + int2(0, 1)) & im)];
+		const float n0 = Field[uint2((int2(id.xy) + int2(-1, 0)) & im)];
+		const float n1 = Field[uint2((int2(id.xy) + int2(1, 0)) & im)];
+		const float n2 = Field[uint2((int2(id.xy) + int2(0, -1)) & im)];
+		const float n3 = Field[uint2((int2(id.xy) + int2(0, 1)) & im)];
 
 		float pull = 0.0f;
 		pull += sign(n0 - h) * max(abs(n0 - h) - maxStep, 0.0f);
@@ -504,35 +423,4 @@ void main(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID,
 	}
 }
 )";
-
-	inline std::string UpdateShaderSource()
-	{
-		return std::format(
-				"static const float kPrintCoreLo = {:.6f};\n"
-				"static const float kPrintCoreHi = {:.6f};\n"
-				"static const float kPrintBandRiseLo = {:.6f};\n"
-				"static const float kPrintBandRiseHi = {:.6f};\n"
-				"static const float kPrintBandFallLo = {:.6f};\n"
-				"static const float kPrintBandFallHi = {:.6f};\n"
-
-				"static const uint2 kActivityGroups = uint2({}, {});\n"
-
-				"static const int2 kActivityWrap = int2({}, {});\n"
-
-				"static const float kCoverageWorldSize = {:.4f}f;\n"
-				"static const float kCoverageTexels    = {:.1f}f;\n"
-				"static const float kMeshCapWorldSize  = {:.4f}f;\n"
-				"static const float kMeshCapTexels     = {:.1f}f;\n"
-
-				"static const float kMeshCapFadeStart  = {:.4f}f;\n"
-				"static const float kMeshCapFadeEnd    = {:.4f}f;\n",
-				kPrintCoreLo, kPrintCoreHi, kPrintBandRiseLo, kPrintBandRiseHi,
-				kPrintBandFallLo, kPrintBandFallHi,
-				kActivityRatio / 8, kActivityRatio / 8,
-				kActivityTexels - 1, kActivityTexels - 1,
-				SnowCoverage::kWorldSize, static_cast<float>(SnowCoverage::kTexels),
-				Shelter::kWorldSize, static_cast<float>(Shelter::kTexels),
-				Shelter::kWorldSize * 0.39f, Shelter::kWorldSize * 0.47f) +
-			kUpdateShader;
-	}
 }

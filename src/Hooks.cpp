@@ -764,7 +764,11 @@ namespace Hooks
 
 		bool RouteBlood(RE::BSRenderPass* pass, const DrawInfo& info)
 		{
-			if (!pass || !BloodDecals::Contains(pass->geometry)) { return false; }
+			if (!pass) { return false; }
+			const auto lookupStarted = Profiler::Ticks();
+			const bool blood = BloodDecals::Contains(pass->geometry);
+			Profiler::AddCpuTicks(Profiler::CpuScope::kBloodLookup, Profiler::Ticks() - lookupStarted);
+			if (!blood) { return false; }
 			bool routed = false;
 			if (globals::Ready() && Settings::useClipmap && Clipmap::Ready() && ShouldRoute(pass)) {
 				auto* context = globals::d3d::context;
@@ -1122,10 +1126,16 @@ namespace Hooks
 					Clipmap::Update(step);
 				}
 
+				const auto sparkleStarted = Profiler::Ticks();
 				SnowSparkle::Update(step);
+				Profiler::AddCpuTicks(Profiler::CpuScope::kSparkleUpdate, Profiler::Ticks() - sparkleStarted);
 
+				const auto actorStarted = Profiler::Ticks();
 				ActorPaint::Update(step);
+				Profiler::AddCpuTicks(Profiler::CpuScope::kActorUpdate, Profiler::Ticks() - actorStarted);
+				const auto bloodStarted = Profiler::Ticks();
 				BloodDecals::Update();
+				Profiler::AddCpuTicks(Profiler::CpuScope::kBloodUpdate, Profiler::Ticks() - bloodStarted);
 
 				func(a1, a2);
 			}

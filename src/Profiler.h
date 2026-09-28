@@ -36,6 +36,13 @@ namespace Profiler
 		kStaticSeen,
 		kStaticRouted,
 		kShaderBuilds,
+		kShelterLandAttempts,
+		kShelterLandMisses,
+		kShelterRays,
+		kShelterFadeVisited,
+		kShelterFadeFull,
+		kCoverageScaled,
+		kCoverageCombineFull,
 		kCount
 	};
 
@@ -61,6 +68,13 @@ namespace Profiler
 		kObjectScan,
 		kShaderPrepare,
 		kMagicImpacts,
+		kActorUpdate,
+		kBloodUpdate,
+		kBloodLookup,
+		kSparkleUpdate,
+		kCoverageFilter,
+		kShelterFilter,
+		kCoverageCombine,
 
 		kCount
 	};

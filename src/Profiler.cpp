@@ -7,6 +7,7 @@
 #include "Globals.h"
 #include "Profiler.h"
 #include "Settings.h"
+#include "ShaderRegistry.h"
 
 #include <algorithm>
 #include <cmath>
@@ -133,6 +134,7 @@ namespace Profiler
 		uint64_t g_dsInvocations{ 0 };
 		uint64_t g_rasterPrims{ 0 };
 		double   g_countSums[static_cast<size_t>(Count::kCount)]{};
+		uint64_t g_shelterProbePeak{};
 
 		uint32_t g_scopeFrames{ 0 };
 		uint32_t g_scopeDrops{ 0 };
@@ -158,6 +160,7 @@ namespace Profiler
 			g_hsInvocations = 0;
 			g_dsInvocations = 0;
 			g_rasterPrims = 0;
+			g_shelterProbePeak = 0;
 			for (auto& sum : g_countSums) {
 				sum = 0.0;
 			}
@@ -323,8 +326,8 @@ namespace Profiler
 
 			UINT64 spanBegin = 0;
 			UINT64 spanEnd = 0;
-			if (a_context->GetData(a_frame.spanBegin, &spanBegin, sizeof(spanBegin), 0) != S_OK ||
-				a_context->GetData(a_frame.spanEnd, &spanEnd, sizeof(spanEnd), 0) != S_OK) {
+			if (a_context->GetData(a_frame.spanBegin, &spanBegin, sizeof(spanBegin), D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK ||
+				a_context->GetData(a_frame.spanEnd, &spanEnd, sizeof(spanEnd), D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK) {
 				return false;
 			}
 			const auto spanMs =
@@ -340,14 +343,14 @@ namespace Profiler
 			if (a_frame.clipClosed) {
 				UINT64 begin = 0;
 				UINT64 end = 0;
-				if (a_context->GetData(a_frame.clipBegin, &begin, sizeof(begin), 0) == S_OK &&
-					a_context->GetData(a_frame.clipEnd, &end, sizeof(end), 0) == S_OK) {
+				if (a_context->GetData(a_frame.clipBegin, &begin, sizeof(begin), D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK &&
+					a_context->GetData(a_frame.clipEnd, &end, sizeof(end), D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK) {
 					g_clipMs.Push(static_cast<float>(static_cast<double>(end - begin) * toMs));
 				}
 			}
 
 			D3D11_QUERY_DATA_PIPELINE_STATISTICS stats{};
-			if (a_context->GetData(a_frame.stats, &stats, sizeof(stats), 0) == S_OK) {
+			if (a_context->GetData(a_frame.stats, &stats, sizeof(stats), D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK) {
 
 				g_hsInvocations += stats.HSInvocations;
 				g_dsInvocations += stats.DSInvocations;
@@ -367,8 +370,8 @@ namespace Profiler
 
 					UINT64 begin = 0;
 					UINT64 end = 0;
-					if (a_context->GetData(scope.begin, &begin, sizeof(begin), 0) != S_OK ||
-						a_context->GetData(scope.end, &end, sizeof(end), 0) != S_OK) {
+					if (a_context->GetData(scope.begin, &begin, sizeof(begin), D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK ||
+						a_context->GetData(scope.end, &end, sizeof(end), D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK) {
 						continue;
 					}
 
@@ -392,6 +395,8 @@ namespace Profiler
 			for (size_t i = 0; i < static_cast<size_t>(Count::kCount); ++i) {
 				g_countSums[i] += static_cast<double>(a_frame.snapshot.counts[i]);
 			}
+			g_shelterProbePeak = std::max(g_shelterProbePeak,
+				static_cast<uint64_t>(a_frame.snapshot.counts[static_cast<size_t>(Count::kShelterLandAttempts)]));
 			for (size_t i = 0; i < static_cast<size_t>(CpuScope::kCount); ++i) {
 				g_cpuMs[i].Push(static_cast<float>(
 					static_cast<double>(a_frame.snapshot.cpuTicks[i]) * g_qpcToMs));
@@ -445,6 +450,7 @@ namespace Profiler
 				return;
 			}
 
+			logger::info("  Optimization test variant: coverage-overlap+blood-pr5");
 			const auto  frames = g_frameMs.n;
 			const float perFrame = 1.0f / static_cast<float>(frames);
 			const float frameAvg = g_frameMs.Avg();
@@ -533,11 +539,21 @@ namespace Profiler
 			for (const auto& [scope, name] : {
 				std::pair{ CpuScope::kObjectScan, "Object scan CPU" },
 				std::pair{ CpuScope::kShaderPrepare, "Shader prepare CPU" },
-				std::pair{ CpuScope::kMagicImpacts, "Magic impacts CPU" } }) {
+				std::pair{ CpuScope::kMagicImpacts, "Magic impacts CPU" },
+				std::pair{ CpuScope::kActorUpdate, "Actor update CPU" },
+				std::pair{ CpuScope::kBloodUpdate, "Blood update CPU" },
+				std::pair{ CpuScope::kBloodLookup, "Blood lookup CPU" },
+				std::pair{ CpuScope::kSparkleUpdate, "Sparkle update CPU" },
+				std::pair{ CpuScope::kCoverageFilter, "Coverage filter CPU" },
+				std::pair{ CpuScope::kShelterFilter, "Shelter filter CPU" },
+				std::pair{ CpuScope::kCoverageCombine, "Coverage combine CPU" } }) {
 				const auto& sample = g_cpuMs[static_cast<size_t>(scope)];
 				logger::info("  {:18} avg {:7.3f} ms  p95 {:7.3f}  max {:7.3f}",
 					name, sample.Avg(), sample.P95(), sample.peak);
 			}
+
+			logger::info("  Shader registry   {} retained vertex shaders | {:.2f} MiB bytecode (not total GPU memory)",
+				ShaderRegistry::Count(), static_cast<double>(ShaderRegistry::Bytes()) / (1024.0 * 1024.0));
 
 			logger::info("  Geometry          HS {:9.0f}  DS {:9.0f} invocations/frame | "
 						 "{:9.0f} primitives rasterised/frame",
@@ -550,6 +566,13 @@ namespace Profiler
 			};
 
 			const float colourRouted = count(Count::kLandscapeRouted);
+			logger::info("  Coverage combine  avg {:.1f} cells scaled/frame vs {:.1f} previous lookups/frame",
+				count(Count::kCoverageScaled), count(Count::kCoverageCombineFull));
+			logger::info("  Shelter fades     avg {:.1f} cells visited/frame vs {:.1f} full-sweep cells/frame",
+				count(Count::kShelterFadeVisited), count(Count::kShelterFadeFull));
+			logger::info("  Shelter probes    avg {:.1f} attempts/frame, {:.1f} misses/frame, {:.1f} rays/frame | peak {} attempts/frame | limit {}",
+				count(Count::kShelterLandAttempts), count(Count::kShelterLandMisses),
+				count(Count::kShelterRays), g_shelterProbePeak, std::max(Settings::shelterBudget, 1));
 			const float depthRouted = count(Count::kDepthRouted);
 
 			logger::info("  Routing colour    seen {:5.1f}  culled {:5.1f}  routed {:5.1f} "

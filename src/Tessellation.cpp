@@ -1229,11 +1229,11 @@ namespace Tessellation
 
 	void EndDraw()
 	{
-		const BracketCpuTimer cpuTimer;
-
 		if (!g_active) {
 			return;
 		}
+
+		const BracketCpuTimer cpuTimer;
 
 		Profiler::GpuEnd();
 
