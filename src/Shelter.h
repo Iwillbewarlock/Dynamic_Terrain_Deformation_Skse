@@ -33,8 +33,6 @@ namespace Shelter
 
 	void Update();
 
-	bool Settling();
-
 	void Reset();
 
 	uint32_t Revision();

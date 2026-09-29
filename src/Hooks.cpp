@@ -1141,13 +1141,10 @@ namespace Hooks
 				}
 				wasIndoors = indoors;
 
-				// A shelter fade still running at the door finishes indoors, as it did
-				// before, so the maps match on the way back out.
-				if (!indoors || Shelter::Settling()) {
-					Shelter::Update();
-				}
-
+				// A shelter fade cut short at the door resumes outside: SnowCoverage compares
+				// Shelter::Revision() every update and recombines when it has moved.
 				if (!indoors) {
+					Shelter::Update();
 					SnowCoverage::Update();
 
 					if (Settings::useClipmap) {
